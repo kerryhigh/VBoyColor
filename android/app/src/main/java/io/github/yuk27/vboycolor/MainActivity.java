@@ -24,6 +24,7 @@ import android.provider.DocumentsContract;
 import android.util.Log;
 import android.view.HapticFeedbackConstants;
 import android.view.View;
+import android.widget.Toast;
 
 import java.io.ByteArrayOutputStream;
 import java.io.File;
@@ -132,6 +133,16 @@ public class MainActivity extends NativeActivity {
     }
 
     // ---- Called from native code (platform/android/AndroidPlatform.h) via JNI ----
+
+    // Short status feedback for the native Cardboard viewer path.
+    public void showCardboardMessage(final String message) {
+        runOnUiThread(new Runnable() {
+            @Override
+            public void run() {
+                Toast.makeText(MainActivity.this, message, Toast.LENGTH_LONG).show();
+            }
+        });
+    }
 
     // A light tap of the phone's vibration motor (an on-screen button pressed).
     public void haptic() {

@@ -33,6 +33,10 @@ public:
     // Settings > Folders, with the system's folder picker (MainActivity's
     // pickFolder: right away on a phone, at the next start on a headset).
     bool SupportsDataFolders() const override { return true; }
+    bool SupportsCardboardViewer() const override { return m_phoneMode; }
+    void RequestCardboardViewerScan() override;
+    void ShowCardboardMessage(const std::string &message) override;
+    void SetPhoneMode(bool enabled) { m_phoneMode = enabled; }
     std::string DataFolderLabel(DataKind kind) const override;
     std::string SetDataFolder(DataKind kind, const std::string &path) override; // ("" only: back to the default)
     std::string PickDataFolder(DataKind kind) override;
@@ -84,4 +88,5 @@ private:
     int m_nextHttpId = 0;
     AAssetManager *m_assetManager = nullptr;
     bool m_canQuit = false, m_quit = false;
+    bool m_phoneMode = false;
 };

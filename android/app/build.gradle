@@ -31,12 +31,14 @@ def gitCommitCount = {
 def repoColorPacksDir = rootProject.file("../colorpacks")
 def colorPacksDir = localProps.getProperty("colorpacks.dir")
 def colorPackAssets = new File(layout.buildDirectory.get().asFile, "generated/colorpack-assets")
+def cardboardLibraries = new File(layout.buildDirectory.get().asFile, "generated/cardboard/libraries")
+def cardboardAar = rootProject.file("../third_party/cardboard/sdk/build/outputs/aar/cardboard-sdk-release.aar")
 
 android {
     namespace "io.github.yuk27.vboycolor"
-    ndkVersion "23.2.8568313"
+    ndkVersion "29.0.14206865"
 
-    compileSdk 34
+    compileSdk 35
 
     defaultConfig {
         applicationId "io.github.yuk27.vboycolor"
@@ -53,6 +55,8 @@ android {
         externalNativeBuild {
             cmake {
                 arguments "-DANDROID_STL=c++_shared"
+                arguments "-DCARDBOARD_LIB_DIR=${new File(cardboardLibraries, 'jni').absolutePath}"
+                arguments "-DCARDBOARD_INCLUDE_DIR=${new File(cardboardLibraries, 'include').absolutePath}"
                 // VBGO_RELEASE_BUILD is deliberately independent of the
                 // debug/release build type (see CMakeLists.txt) - assembleRelease
                 // is normally still just a fast local build for on-device
@@ -144,6 +148,27 @@ android {
     }
 }
 
+// Use the SDK's Gradle/CMake build and package its native Vulkan renderer from
+// the AAR; no SDK source files are copied into this application.
+tasks.register("extractCardboardNative") {
+    dependsOn(":cardboard-sdk:assembleRelease")
+    inputs.file(cardboardAar)
+    inputs.file(rootProject.file("../third_party/cardboard/sdk/include/cardboard.h"))
+    outputs.dir(cardboardLibraries)
+    doLast {
+        project.delete(cardboardLibraries)
+        project.copy {
+            from zipTree(cardboardAar)
+            into cardboardLibraries
+            include "jni/**/libGfxPluginCardboard.so"
+        }
+        project.copy {
+            from rootProject.file("../third_party/cardboard/sdk/include/cardboard.h")
+            into new File(cardboardLibraries, "include")
+        }
+    }
+}
+
 // Copies the packs to bundle (see colorpacks.dir above) before every build -
 // fresh each time, so a pack removed from that folder leaves the app too.
 def bundleColorPacks = tasks.register("bundleColorPacks") {
@@ -191,4 +216,8 @@ def bundleColorPacks = tasks.register("bundleColorPacks") {
         logger.lifecycle("Bundled ${bundled.size()} color pack(s) (${index.size()} findable by ROM checksum): ${bundled.join(', ')}")
     }
 }
-tasks.named("preBuild").configure { dependsOn(bundleColorPacks) }
+tasks.named("preBuild").configure { dependsOn(bundleColorPacks, "extractCardboardNative") }
+
+dependencies {
+    implementation project(":cardboard-sdk")
+}

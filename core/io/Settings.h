@@ -62,8 +62,9 @@ enum class Screen3D
     GreenMagenta = 6,
     AmberBlue = 7,
     TopBottomFull = 8,  // one above the other, each eye at its own shape
+    GoogleCardboard = 9, // Android phone: SDK-calibrated lens distortion
 };
-inline constexpr int kScreen3DCount = 9;
+inline constexpr int kScreen3DCount = 10;
 // The anaglyph glasses (1 red/cyan, 2 green/magenta, 3 amber/blue - see
 // shaders/anaglyph.frag), 0 for the other modes.
 constexpr int AnaglyphOf(int screen3D) { return screen3D >= 5 && screen3D <= 7 ? screen3D - 4 : 0; }
@@ -104,7 +105,7 @@ struct AppSettings
     // defaults in place) on a mismatch rather than attempting migration,
     // except from version 11, whose layout is an exact prefix of this one
     // (12 only appended selectedShadePalette) - see Settings.cpp.
-    static constexpr int kVersion = 26;
+    static constexpr int kVersion = 27;
 
     // Move Screen / Follow Head. Only OpenXrApp's quad-layer pose consumes
     // these - meaningless on the flat pc2d debug build.
@@ -208,6 +209,11 @@ struct AppSettings
     // Version 26 (appended): a development builds' performance overlay, since
     // removed - kept so the layout (and a version 26 file) stays as it was.
     bool unused26 = false;
+
+    // Version 27 (appended): magnification of the fixed Virtual Boy image in
+    // Cardboard mode. The SDK still supplies all viewer optics; this only
+    // scales the source image inside each calibrated eye view.
+    float cardboardScale = 1.0f;
 
     // What the screen should be drawn with (Emulator::DrawScreen's tint/
     // patternIndex) - neutral while a shade palette is active, since its

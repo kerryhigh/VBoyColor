@@ -145,8 +145,12 @@ void UiRenderer::Shutdown()
         vkDestroyPipelineLayout(m_device, m_solidPipelineLayout, nullptr);
     if (m_offscreenRenderPass != VK_NULL_HANDLE)
         vkDestroyRenderPass(m_device, m_offscreenRenderPass, nullptr);
+    if (m_generalOffscreenRenderPass != VK_NULL_HANDLE)
+        vkDestroyRenderPass(m_device, m_generalOffscreenRenderPass, nullptr);
     if (m_renderPass != VK_NULL_HANDLE)
         vkDestroyRenderPass(m_device, m_renderPass, nullptr);
+    if (m_presentRenderPass != VK_NULL_HANDLE)
+        vkDestroyRenderPass(m_device, m_presentRenderPass, nullptr);
     if (m_unitQuadVertexBuffer != VK_NULL_HANDLE)
         vkDestroyBuffer(m_device, m_unitQuadVertexBuffer, nullptr);
     if (m_unitQuadVertexBufferMemory != VK_NULL_HANDLE)
@@ -335,10 +339,12 @@ void UiRenderer::DestroyImageResources(Image &img)
     img.memory = VK_NULL_HANDLE;
 }
 
-UiImageHandle UiRenderer::CreateRenderTexture(uint32_t width, uint32_t height, VkFormat format, bool sampleEncoded)
+UiImageHandle UiRenderer::CreateRenderTexture(uint32_t width, uint32_t height, VkFormat format, bool sampleEncoded,
+                                              bool generalLayout)
 {
     Image image;
     image.sampleEncoded = sampleEncoded;
+    image.generalLayout = generalLayout;
     CreateImageResources(image, width, height, format);
 
     VkDescriptorSetAllocateInfo setAllocInfo{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
@@ -351,7 +357,7 @@ UiImageHandle UiRenderer::CreateRenderTexture(uint32_t width, uint32_t height, V
     VkDescriptorImageInfo imageDescInfo{};
     imageDescInfo.sampler = image.sampler;
     imageDescInfo.imageView = image.view;
-    imageDescInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    imageDescInfo.imageLayout = generalLayout ? VK_IMAGE_LAYOUT_GENERAL : VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
 
     VkWriteDescriptorSet write{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
     write.dstSet = image.descriptorSet;
@@ -363,6 +369,13 @@ UiImageHandle UiRenderer::CreateRenderTexture(uint32_t width, uint32_t height, V
 
     m_images.push_back(image);
     return UiImageHandle{static_cast<int>(m_images.size()) - 1};
+}
+
+VkImage UiRenderer::GetRenderTextureImage(UiImageHandle handle) const
+{
+    if (!handle.IsValid() || static_cast<size_t>(handle.id) >= m_images.size())
+        return VK_NULL_HANDLE;
+    return m_images[handle.id].image;
 }
 
 void UiRenderer::ResizeRenderTexture(UiImageHandle handle, uint32_t width, uint32_t height)
@@ -383,7 +396,7 @@ void UiRenderer::ResizeRenderTexture(UiImageHandle handle, uint32_t width, uint3
     VkDescriptorImageInfo imageDescInfo{};
     imageDescInfo.sampler = img.sampler;
     imageDescInfo.imageView = img.view;
-    imageDescInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    imageDescInfo.imageLayout = img.generalLayout ? VK_IMAGE_LAYOUT_GENERAL : VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
 
     VkWriteDescriptorSet write{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
     write.dstSet = img.descriptorSet;
@@ -548,10 +561,12 @@ void UiRenderer::UpdateStreamingImage(UiImageHandle handle, const void *pixels, 
 
 // --- Frame management ---
 
-void UiRenderer::BeginFrame(VkImage image, VkFormat format, uint32_t width, uint32_t height, const XrColor4f &clearColor)
+void UiRenderer::BeginFrame(VkImage image, VkFormat format, uint32_t width, uint32_t height, const XrColor4f &clearColor,
+                            bool presentImage)
 {
     EnsurePipelines(format);
-    RenderTarget &target = GetOrCreateRenderTarget(image, format, width, height, m_renderPass);
+    const VkRenderPass renderPass = presentImage ? GetOrCreatePresentRenderPass(format) : m_renderPass;
+    RenderTarget &target = GetOrCreateRenderTarget(image, format, width, height, renderPass);
 
     m_frameWidth = static_cast<float>(width);
     m_frameHeight = static_cast<float>(height);
@@ -568,7 +583,7 @@ void UiRenderer::BeginFrame(VkImage image, VkFormat format, uint32_t width, uint
     clearValue.color = {{clearColor.r, clearColor.g, clearColor.b, clearColor.a}};
 
     VkRenderPassBeginInfo renderPassBegin{VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO};
-    renderPassBegin.renderPass = m_renderPass;
+    renderPassBegin.renderPass = renderPass;
     renderPassBegin.framebuffer = target.framebuffer;
     renderPassBegin.renderArea.extent = {width, height};
     renderPassBegin.clearValueCount = 1;
@@ -592,8 +607,8 @@ void UiRenderer::BeginOffscreenFrame(UiImageHandle target, const XrColor4f &clea
     const Image &img = m_images[target.id];
 
     EnsurePipelines(img.format);
-    GetOrCreateOffscreenRenderPass(img.format);
-    RenderTarget &rt = GetOrCreateRenderTarget(img.image, img.format, img.width, img.height, m_offscreenRenderPass);
+    const VkRenderPass renderPass = GetOrCreateOffscreenRenderPass(img.format, img.generalLayout);
+    RenderTarget &rt = GetOrCreateRenderTarget(img.image, img.format, img.width, img.height, renderPass);
 
     // The NDC divisor can be smaller than the physical target (see the
     // logicalWidth/logicalHeight doc comment in the header) - the viewport
@@ -613,7 +628,7 @@ void UiRenderer::BeginOffscreenFrame(UiImageHandle target, const XrColor4f &clea
     clearValue.color = {{clearColor.r, clearColor.g, clearColor.b, clearColor.a}};
 
     VkRenderPassBeginInfo renderPassBegin{VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO};
-    renderPassBegin.renderPass = m_offscreenRenderPass;
+    renderPassBegin.renderPass = renderPass;
     renderPassBegin.framebuffer = rt.framebuffer;
     renderPassBegin.renderArea.extent = {img.width, img.height};
     renderPassBegin.clearValueCount = 1;
@@ -627,6 +642,38 @@ void UiRenderer::BeginOffscreenFrame(UiImageHandle target, const XrColor4f &clea
 
     VkDeviceSize offset = 0;
     vkCmdBindVertexBuffers(m_commandBuffer, 0, 1, &m_unitQuadVertexBuffer, &offset);
+}
+
+void UiRenderer::BeginCardboardFrame(VkFramebuffer framebuffer, VkRenderPass renderPass, uint32_t width, uint32_t height,
+                                     const XrColor4f &clearColor)
+{
+    m_frameWidth = static_cast<float>(width);
+    m_frameHeight = static_cast<float>(height);
+    m_pixelScale = 1.0f;
+    m_targetWidth = width;
+    m_targetHeight = height;
+
+    vkResetCommandBuffer(m_commandBuffer, 0);
+    VkCommandBufferBeginInfo beginInfo{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
+    beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    CheckVk(vkBeginCommandBuffer(m_commandBuffer, &beginInfo), "vkBeginCommandBuffer (Cardboard frame)");
+
+    VkClearValue clearValues[2]{};
+    clearValues[0].color = {{clearColor.r, clearColor.g, clearColor.b, clearColor.a}};
+    clearValues[1].depthStencil = {1.0f, 0};
+
+    VkRenderPassBeginInfo renderPassBegin{VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO};
+    renderPassBegin.renderPass = renderPass;
+    renderPassBegin.framebuffer = framebuffer;
+    renderPassBegin.renderArea.extent = {width, height};
+    renderPassBegin.clearValueCount = 2;
+    renderPassBegin.pClearValues = clearValues;
+    vkCmdBeginRenderPass(m_commandBuffer, &renderPassBegin, VK_SUBPASS_CONTENTS_INLINE);
+
+    VkViewport viewport{0, 0, static_cast<float>(width), static_cast<float>(height), 0.0f, 1.0f};
+    vkCmdSetViewport(m_commandBuffer, 0, 1, &viewport);
+    VkRect2D scissor{{0, 0}, {width, height}};
+    vkCmdSetScissor(m_commandBuffer, 0, 1, &scissor);
 }
 
 void UiRenderer::SetClipRect(float x, float y, float w, float h)

@@ -53,6 +53,8 @@ namespace
             return offsetof(AppSettings, touchControls);
         case 25:
             return offsetof(AppSettings, unused26);
+        case 26:
+            return offsetof(AppSettings, cardboardScale);
         default:
             return 0;
         }

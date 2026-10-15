@@ -1,6 +1,7 @@
 #include "android/AndroidPlatform.h"
 
 #include <android/asset_manager.h>
+#include <cardboard.h>
 
 #include <algorithm>
 #include <cstdint>
@@ -60,6 +61,24 @@ void AndroidPlatform::RequestChangeRomsFolder()
     jclass activityClass = env->GetObjectClass(m_activity);
     jmethodID request = env->GetMethodID(activityClass, "requestChangeRomsFolder", "()V");
     env->CallVoidMethod(m_activity, request);
+    env->DeleteLocalRef(activityClass);
+}
+
+void AndroidPlatform::RequestCardboardViewerScan()
+{
+    if (!m_phoneMode)
+        return;
+    CardboardQrCode_scanQrCodeAndSaveDeviceParams();
+}
+
+void AndroidPlatform::ShowCardboardMessage(const std::string &message)
+{
+    JNIEnv *env = Env();
+    jclass activityClass = env->GetObjectClass(m_activity);
+    jmethodID show = env->GetMethodID(activityClass, "showCardboardMessage", "(Ljava/lang/String;)V");
+    jstring text = env->NewStringUTF(message.c_str());
+    env->CallVoidMethod(m_activity, show, text);
+    env->DeleteLocalRef(text);
     env->DeleteLocalRef(activityClass);
 }
 

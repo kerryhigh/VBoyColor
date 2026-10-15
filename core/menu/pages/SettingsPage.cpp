@@ -179,12 +179,20 @@ void SettingsPage::Init(UiRenderer &ui, const UiMenuResources &resources)
             RefreshLabels();
         };
         m_sizeEntry = list->AddEntry("Size", toggleSize, toggleSize, toggleSize, UiIconId::Scale);
+        if (m_platform->SupportsCardboardViewer())
+            m_cardboardScaleEntry = list->AddEntry("Cardboard scale", [this](MenuItem *) { ChangeCardboardScale(0.05f); },
+                                                   [this](MenuItem *) { ChangeCardboardScale(-0.05f); },
+                                                   [this](MenuItem *) { ChangeCardboardScale(0.05f); }, UiIconId::Scale);
         // A flat screen's 3D (see Screen3D): 3D TVs and monitors, colored glasses.
         m_threeDEntry = list->AddEntry("3D", [this](MenuItem *) { Change3D(1); }, [this](MenuItem *) { Change3D(-1); },
                                        [this](MenuItem *) { Change3D(1); }, UiIconId::ThreeD);
         m_threeDFormatEntry = list->AddEntry("Format", [this](MenuItem *) { Change3DFormat(1); },
                                              [this](MenuItem *) { Change3DFormat(-1); },
                                              [this](MenuItem *) { Change3DFormat(1); });
+        if (m_platform->SupportsCardboardViewer())
+            m_cardboardScanEntry = list->AddEntry("Scan viewer QR code", [this](MenuItem *)
+                                                  { m_platform->RequestCardboardViewerScan(); },
+                                                  nullptr, nullptr, UiIconId::ThreeD);
     }
 
     list->AddHeader("Library");
@@ -401,6 +409,28 @@ void SettingsPage::Change3D(int delta)
 {
     if (!m_settings)
         return;
+    if (m_platform && m_platform->SupportsCardboardViewer())
+    {
+        // Keep every existing flat mode and its order, with Cardboard as a
+        // fifth, distinct display mode on Android phones only.
+        static constexpr Screen3D kPhoneModes[] = {Screen3D::Off, Screen3D::SideBySideHalf,
+                                                   Screen3D::TopBottom, Screen3D::RedCyan,
+                                                   Screen3D::GoogleCardboard};
+        int at = 0;
+        const Screen3D current = static_cast<Screen3D>(m_settings->screen3D);
+        if (current == Screen3D::SideBySideHalf || current == Screen3D::SideBySideFull || current == Screen3D::CrossEyed)
+            at = 1;
+        else if (current == Screen3D::TopBottom || current == Screen3D::TopBottomFull)
+            at = 2;
+        else if (current == Screen3D::RedCyan || current == Screen3D::GreenMagenta || current == Screen3D::AmberBlue)
+            at = 3;
+        else if (current == Screen3D::GoogleCardboard)
+            at = 4;
+        at = (at + (delta > 0 ? 1 : -1) + 5) % 5;
+        m_settings->screen3D = static_cast<int>(kPhoneModes[at]);
+        RefreshLabels();
+        return;
+    }
     // The next kind, at its first format (3D TV / red-cyan).
     const int kind = (static_cast<int>(KindOf(m_settings->screen3D)) + delta + kScreen3DKindCount) % kScreen3DKindCount;
     const Screen3DFormats formats = FormatsOf(static_cast<Screen3DKind>(kind));
@@ -420,6 +450,14 @@ void SettingsPage::Change3DFormat(int delta)
         if (static_cast<int>(formats.modes[i]) == m_settings->screen3D)
             at = i;
     m_settings->screen3D = static_cast<int>(formats.modes[(at + delta + formats.count) % formats.count]);
+    RefreshLabels();
+}
+
+void SettingsPage::ChangeCardboardScale(float delta)
+{
+    if (!m_settings)
+        return;
+    m_settings->cardboardScale = std::clamp(m_settings->cardboardScale + delta, 0.75f, 1.25f);
     RefreshLabels();
 }
 
@@ -447,7 +485,19 @@ void SettingsPage::RefreshLabels(bool save)
     static constexpr const char *kLookNames[kScreenLookCount] = {"Sharp", "Smooth", "LED"};
     m_lookEntry->SetValue(kLookNames[std::clamp(m_settings->screenLook, 0, kScreenLookCount - 1)]);
     if (m_sizeEntry)
+    {
+        const bool cardboard = m_platform && m_platform->SupportsCardboardViewer() &&
+                               m_settings->screen3D == static_cast<int>(Screen3D::GoogleCardboard);
+        m_sizeEntry->SetText(cardboard ? "Pixel scaling" : "Size");
         m_sizeEntry->SetValue(m_settings->screenWholePixels ? "Whole pixels" : "Fit");
+    }
+    if (m_cardboardScaleEntry)
+    {
+        const bool cardboard = m_platform && m_platform->SupportsCardboardViewer() &&
+                               m_settings->screen3D == static_cast<int>(Screen3D::GoogleCardboard);
+        m_cardboardScaleEntry->Visible = cardboard;
+        m_cardboardScaleEntry->SetValue(FormatFloat("", m_settings->cardboardScale * 100.0f, 0, "%"));
+    }
     for (int i = 0; i < kDataKindCount; ++i)
         if (m_folderEntries[i])
         {
@@ -462,9 +512,11 @@ void SettingsPage::RefreshLabels(bool save)
     {
         static constexpr const char *kKinds[kScreen3DKindCount] = {"Off", "Side by side", "Top and bottom", "Colored glasses"};
         const Screen3DKind kind = KindOf(m_settings->screen3D);
-        m_threeDEntry->SetValue(kKinds[static_cast<int>(kind)]);
+        const bool cardboard = m_platform && m_platform->SupportsCardboardViewer() &&
+                               m_settings->screen3D == static_cast<int>(Screen3D::GoogleCardboard);
+        m_threeDEntry->SetValue(cardboard ? "Google Cardboard" : kKinds[static_cast<int>(kind)]);
         const Screen3DFormats formats = FormatsOf(kind);
-        m_threeDFormatEntry->Visible = formats.count > 0;
+        m_threeDFormatEntry->Visible = formats.count > 0 && !cardboard;
         if (formats.count)
         {
             m_threeDFormatEntry->SetText(kind == Screen3DKind::Glasses ? "Glasses" : "Format");
@@ -473,6 +525,8 @@ void SettingsPage::RefreshLabels(bool save)
                     m_threeDFormatEntry->SetValue(formats.names[i]);
         }
     }
+    if (m_cardboardScanEntry)
+        m_cardboardScanEntry->SetValue("Custom viewer profile");
     // 2 decimals, not 3 - kColorStep is 0.05, so the third decimal is always
     // 0 and never actually reachable by adjusting the value.
     m_colorREntry->SetValue(FormatFloat("", m_settings->colorR, 2));

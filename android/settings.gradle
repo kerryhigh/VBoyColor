@@ -14,5 +14,6 @@ dependencyResolutionManagement {
 }
 
 rootProject.name = "VBoyColor"
-include(":app")
+include(":app", ":cardboard-sdk")
 project(":app").projectDir = file("app")
+project(":cardboard-sdk").projectDir = file("../third_party/cardboard/sdk")

@@ -1,3 +1,6 @@
 [submodule "third_party/beetle-vb-libretro"]
 	path = third_party/beetle-vb-libretro
 	url = https://github.com/libretro/beetle-vb-libretro.git
+[submodule "third_party/cardboard"]
+	path = third_party/cardboard
+	url = https://github.com/googlevr/cardboard.git
