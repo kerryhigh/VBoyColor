@@ -180,9 +180,10 @@ void SettingsPage::Init(UiRenderer &ui, const UiMenuResources &resources)
         };
         m_sizeEntry = list->AddEntry("Size", toggleSize, toggleSize, toggleSize, UiIconId::Scale);
         if (m_platform->SupportsCardboardViewer())
-            m_cardboardScaleEntry = list->AddEntry("Cardboard scale", [this](MenuItem *) { ChangeCardboardScale(0.05f); },
-                                                   [this](MenuItem *) { ChangeCardboardScale(-0.05f); },
-                                                   [this](MenuItem *) { ChangeCardboardScale(0.05f); }, UiIconId::Scale);
+            m_cardboardScaleEntry = list->AddEntry("Cardboard screen size",
+                                                   [this](MenuItem *) { ChangeCardboardScale(kCardboardScaleStep); },
+                                                   [this](MenuItem *) { ChangeCardboardScale(-kCardboardScaleStep); },
+                                                   [this](MenuItem *) { ChangeCardboardScale(kCardboardScaleStep); }, UiIconId::Scale);
         // A flat screen's 3D (see Screen3D): 3D TVs and monitors, colored glasses.
         m_threeDEntry = list->AddEntry("3D", [this](MenuItem *) { Change3D(1); }, [this](MenuItem *) { Change3D(-1); },
                                        [this](MenuItem *) { Change3D(1); }, UiIconId::ThreeD);
@@ -457,7 +458,8 @@ void SettingsPage::ChangeCardboardScale(float delta)
 {
     if (!m_settings)
         return;
-    m_settings->cardboardScale = std::clamp(m_settings->cardboardScale + delta, 0.75f, 1.25f);
+    m_settings->cardboardScale = std::clamp(m_settings->cardboardScale + delta, AppSettings::kMinCardboardScale,
+                                            AppSettings::kMaxCardboardScale);
     RefreshLabels();
 }
 

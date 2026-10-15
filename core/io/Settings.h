@@ -101,11 +101,9 @@ constexpr Screen3DKind KindOf(int screen3D)
 
 struct AppSettings
 {
-    // Bumped whenever the on-disk layout changes - Load() refuses (leaves
-    // defaults in place) on a mismatch rather than attempting migration,
-    // except from version 11, whose layout is an exact prefix of this one
-    // (12 only appended selectedShadePalette) - see Settings.cpp.
-    static constexpr int kVersion = 27;
+    // Bumped when the on-disk settings schema changes. Known older versions
+    // with append-only layouts are migrated in Settings.cpp.
+    static constexpr int kVersion = 28;
 
     // Move Screen / Follow Head. Only OpenXrApp's quad-layer pose consumes
     // these - meaningless on the flat pc2d debug build.
@@ -212,8 +210,12 @@ struct AppSettings
 
     // Version 27 (appended): magnification of the fixed Virtual Boy image in
     // Cardboard mode. The SDK still supplies all viewer optics; this only
-    // scales the source image inside each calibrated eye view.
-    float cardboardScale = 1.0f;
+    // scales the source image inside each calibrated eye view. A smaller image
+    // occupies less of the calibrated view and feels farther away.
+    static constexpr float kDefaultCardboardScale = 0.80f;
+    static constexpr float kMinCardboardScale = 0.50f;
+    static constexpr float kMaxCardboardScale = 1.25f;
+    float cardboardScale = kDefaultCardboardScale;
 
     // What the screen should be drawn with (Emulator::DrawScreen's tint/
     // patternIndex) - neutral while a shade palette is active, since its

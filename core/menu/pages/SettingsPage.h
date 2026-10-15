@@ -35,6 +35,7 @@ public:
 
 private:
     static constexpr float kColorStep = 0.05f; // matches FrontendGo's COLOR_STEP_SIZE
+    static constexpr float kCardboardScaleStep = 0.05f;
 
     // The Color Mode row's choices - which kind of palette the Color
     // Palette row cycles: Tint = flat single color (kPredefColors + custom

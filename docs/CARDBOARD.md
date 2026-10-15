@@ -2,13 +2,16 @@
 
 ## Enable and configure
 
-1. Open VBoy Color on an Android phone and open **Settings → Screen → 3D**.
-2. Select **Google Cardboard**.
-3. Choose **Scan viewer QR code** and scan the code supplied with the viewer.
+1. Open VBoy Color on an Android phone. A clean install starts in Google
+   Cardboard mode; existing saved display choices are preserved. To change
+   the mode, open **Settings → Screen → 3D** and select **Google Cardboard**.
+2. Choose **Scan viewer QR code** and scan the code supplied with the viewer.
    Google's scanner accepts standard Cardboard viewer profiles, including
    custom-generated profiles. Camera access is requested by the SDK scanner.
-4. Start a game and place the phone in the viewer. In **Settings → Screen**,
-   use **Cardboard scale** to adjust the image from 75% to 125% in 5% steps.
+3. Start a game and place the phone in the viewer. In **Settings → Screen**,
+   use **Cardboard screen size** to adjust the image from 50% to 125% in 5%
+   steps. It starts at 80%; lower values make the centered image smaller and
+   appear farther away, while higher values make it larger and appear closer.
    **Pixel scaling** still chooses **Fit** or **Whole pixels** for the source
    pixels.
 
@@ -24,6 +27,8 @@ the app.
 - Use the mapped gamepad D-pad/stick and confirm button to navigate. The menu
   is rendered as the same centered plane in both eyes and receives the same
   Cardboard optical correction as the game.
+- With the phone outside the viewer, tap the menu in the left-eye half of the
+  display to choose a game or setting. In the viewer, use a Bluetooth gamepad.
 - **Android Back exits Cardboard mode immediately**, even when the menu is
   open. The normal phone display returns without requiring a controller.
 - Touch gameplay controls and the ordinary phone overlays are hidden while
@@ -53,9 +58,11 @@ distorts the two eyes into a depth-backed Vulkan display pass. This keeps the
 existing palette, color pack, Sharp/Smooth/LED processing and avoids an extra
 emulator run, CPU readback, or per-frame image allocation.
 
-Cardboard scale applies a bounded user magnification inside each eye viewport;
-the SDK lens profile remains responsible for all optical correction and eye
-geometry.
+Cardboard screen size scales the centered source image inside each eye viewport
+without changing its aspect ratio or separation. A smaller angular image gives
+the impression of a farther screen; this does not add a virtual scene or head
+tracking. The SDK lens profile remains responsible for optical correction and
+eye geometry.
 
 Cardboard is deliberately zero-DOF: VBoy Color never creates a Cardboard head
 tracker or reads gyroscope/accelerometer pose. A profile change rebuilds the
@@ -68,20 +75,22 @@ display and a toast explains the fallback.
 
 1. Build `android/app/build/outputs/apk/debug/app-debug.apk`, install it on the
    Galaxy S21+, and launch VBoy Color normally.
-2. Choose the ROMs folder if prompted, then select Settings → Screen → 3D →
-   Google Cardboard.
+2. Choose the ROMs folder if prompted. The library should show the ROMs in that
+   folder; tap Wario Land in the left-eye half to start it before putting the
+   phone in the viewer. A clean install already starts in Cardboard mode; on an
+   existing install, select Settings → Screen → 3D → Google Cardboard.
 3. Select **Scan viewer QR code**, grant camera permission, and scan the QR
    code printed for the generic viewer. For a custom viewer, generate a
    standard Google Cardboard profile QR code and scan that instead.
-4. Connect a Bluetooth gamepad. Start a Virtual Boy game, put the phone in the
-   viewer, and verify that the left game image is seen by the left eye and the
+4. Connect a Bluetooth gamepad. Put the phone in the viewer and verify that
+   the left game image is seen by the left eye and the
    right image by the right eye. Check that the display is landscape, the
    picture is not stretched or mirrored, and color palettes and display looks
    remain active.
-5. Adjust Cardboard scale and confirm both images stay centered and keep their
-   aspect ratio. Compare Fit and Whole pixels under Pixel scaling. Open the
-   menu with Guide or Select + Start and verify that both eyes show the same
-   corrected menu plane.
+5. Adjust Cardboard screen size from 50% to 125% and confirm both images stay
+   centered and keep their aspect ratio. Compare Fit and Whole pixels under
+   Pixel scaling. Open the menu with Guide or Select + Start and verify that
+   both eyes show the same corrected menu plane.
 6. Press Android Back while playing and confirm the normal phone display
    returns. Also test Android pause/resume, rotating between landscape
    orientations, rescanning a different profile, and canceling a scan.

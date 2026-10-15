@@ -119,11 +119,14 @@ pack).*
   *colored glasses* - *red / cyan*, *green / magenta* or *amber / blue*
   (mixed with Dubois' method, which keeps the games' colors as true as the
   glasses allow). Pictures of both at the top of this page.
-- **Google Cardboard on Android phones** - select Settings → Screen → 3D →
-  Google Cardboard, then Scan viewer QR code and scan the code supplied with
-  your viewer. Custom Cardboard viewer profiles work too. The official SDK
-  corrects each eye for that profile's lenses; Cardboard scale adjusts image
-  size, and no head tracking is used.
+- **Google Cardboard on Android phones** - a clean phone install starts in
+  Google Cardboard mode; existing saved display choices are preserved. To
+  change it, use Settings → Screen → 3D. Select **Scan viewer QR code** and
+  scan the code supplied with your viewer. Custom Cardboard viewer profiles
+  work too. The official SDK
+  corrects each eye for that profile's lenses. The screen starts at a more
+  relaxed 80% size and is adjustable from 50% to 125%; a smaller size appears
+  farther away. No head tracking is used.
   Select + Start or Guide opens the menu, and Android Back exits Cardboard
   mode immediately. See [Cardboard setup and testing](docs/CARDBOARD.md).
 - **Your room as the background** (Quest) - Settings → Adjust screen →
