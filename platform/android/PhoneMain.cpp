@@ -761,7 +761,8 @@ namespace
 void RunPhoneApp(android_app *app, AndroidPlatform &platform)
 {
     platform.SetPhoneMode(true);
-    Cardboard_initializeAndroid(app->activity->vm, app->activity->clazz);
+    if (!platform.InitializeCardboardSdk())
+        platform.ShowCardboardMessage("Google Cardboard isn't available on this launch. The normal phone display will still work.");
     PhoneState state;
     app->userData = &state;
     platform.SetCanQuit(true); // (the menu's Quit - a TV with a gamepad has no other way out)
@@ -816,15 +817,20 @@ void RunPhoneApp(android_app *app, AndroidPlatform &platform)
       {
         // Events: all that are waiting - or, with nothing to show (in the
         // background, no window, the ROMs folder picker up), wait for one.
+        // The Cardboard Java initializer is queued onto Android's main thread;
+        // briefly poll while it completes so SDK class lookup never blocks the
+        // UI thread during NativeActivity.onCreate().
         bool quit = false;
         for (;;)
         {
             // (the folder is asked of Android only until the app is up - it's a
             // system call)
-            const bool active = state.resumed && state.window && (ready || platform.HasRomsFolder());
+            const bool sdkInitComplete = platform.CardboardSdkInitializationComplete();
+            const bool active = state.resumed && state.window && (ready || sdkInitComplete);
             int events = 0;
             android_poll_source *source = nullptr;
-            if (ALooper_pollOnce(active ? 0 : -1, nullptr, &events, reinterpret_cast<void **>(&source)) < 0)
+            const int timeoutMs = active ? 0 : (sdkInitComplete ? -1 : 100);
+            if (ALooper_pollOnce(timeoutMs, nullptr, &events, reinterpret_cast<void **>(&source)) < 0)
                 break;
             const bool wasResumed = state.resumed;
             if (source)
@@ -847,6 +853,12 @@ void RunPhoneApp(android_app *app, AndroidPlatform &platform)
         }
         if (quit)
             break;
+
+        // Wait asynchronously for the UI-thread Cardboard setup before making
+        // settings visible. A failed or timed-out setup still opens ordinary
+        // phone mode once the Platform marks initialization complete.
+        if (!ready && !platform.CardboardSdkInitializationComplete())
+            continue;
 
         if (state.windowChanged)
         {
@@ -874,6 +886,12 @@ void RunPhoneApp(android_app *app, AndroidPlatform &platform)
                         if (!settingsLoaded)
                         {
                             settings.Load(platform);
+                            if (!platform.SupportsCardboardViewer() &&
+                                static_cast<Screen3D>(settings.screen3D) == Screen3D::GoogleCardboard)
+                            {
+                                settings.screen3D = static_cast<int>(Screen3D::Off);
+                                settings.Save(platform);
+                            }
                             // (A/B where the Virtual Boy has them, as on the PC window)
                             if (!settings.gamepadByPosition)
                             {

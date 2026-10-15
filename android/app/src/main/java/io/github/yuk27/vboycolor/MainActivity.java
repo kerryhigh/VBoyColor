@@ -18,6 +18,8 @@ import android.net.Uri;
 import android.os.BatteryManager;
 import android.os.Build;
 import android.os.Bundle;
+import android.os.Handler;
+import android.os.Looper;
 import android.os.ParcelFileDescriptor;
 import android.os.PersistableBundle;
 import android.provider.DocumentsContract;
@@ -87,7 +89,7 @@ public class MainActivity extends NativeActivity {
         super.onActivityResult(requestCode, resultCode, data);
         if (requestCode >= REQUEST_PICK_FOLDER && requestCode < REQUEST_PICK_FOLDER + KIND_COUNT) {
             if (resultCode == RESULT_OK && data != null && data.getData() != null) {
-                folderPicked(requestCode - REQUEST_PICK_FOLDER, data.getData());
+                folderPicked(requestCode - REQUEST_PICK_FOLDER, data);
             }
             return;
         }
@@ -100,14 +102,74 @@ public class MainActivity extends NativeActivity {
         }
 
         // Persistable so it survives restarts (the point of SAF: pick once).
-        // Read+write, since save states/SRAM go back into this folder.
-        getContentResolver().takePersistableUriPermission(treeUri,
-                Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_GRANT_WRITE_URI_PERMISSION);
+        // Use only the grants the picker actually returned. Providers can
+        // grant read-only access, and asking for an ungranted write flag here
+        // throws SecurityException and kills the activity on some devices.
+        int grantedFlags = persistableTreeFlags(data);
+        if ((grantedFlags & Intent.FLAG_GRANT_READ_URI_PERMISSION) == 0 ||
+                !takeTreePermission(treeUri, grantedFlags)) {
+            showFolderPickerMessage("Couldn't access that folder. Choose a folder with read access and try again.");
+            return;
+        }
 
         SharedPreferences prefs = getSharedPreferences(PREFS_NAME, MODE_PRIVATE);
         prefs.edit().putString(PREF_ROMS_TREE_URI, treeUri.toString()).apply();
         Log.d(TAG, "ROMs folder set: " + treeUri);
     }
+
+    private static int persistableTreeFlags(Intent data) {
+        return data.getFlags() & (Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_GRANT_WRITE_URI_PERMISSION);
+    }
+
+    private boolean takeTreePermission(Uri treeUri, int flags) {
+        try {
+            getContentResolver().takePersistableUriPermission(treeUri, flags);
+            return true;
+        } catch (SecurityException e) {
+            Log.e(TAG, "takePersistableUriPermission failed for " + treeUri, e);
+            return false;
+        }
+    }
+
+    private void showFolderPickerMessage(final String message) {
+        runOnUiThread(new Runnable() {
+            @Override
+            public void run() {
+                Toast.makeText(MainActivity.this, message, Toast.LENGTH_LONG).show();
+            }
+        });
+    }
+
+    // The Cardboard SDK resolves its Java classes with FindClass. Calling its
+    // native initializer from NativeActivity's worker thread uses the system
+    // class loader and crashes because app classes are invisible there. Queue
+    // the callback on the Activity thread, whose class loader can resolve the
+    // SDK's Java classes, without blocking NativeActivity.onCreate().
+    public boolean requestCardboardSdkInitialization() {
+        if (Looper.myLooper() == Looper.getMainLooper()) {
+            return initializeCardboardSdkNativeSafely();
+        }
+
+        return new Handler(Looper.getMainLooper()).post(new Runnable() {
+            @Override
+            public void run() {
+                if (!initializeCardboardSdkNativeSafely()) {
+                    Log.e(TAG, "Cardboard SDK initialization failed on the main thread");
+                }
+            }
+        });
+    }
+
+    private boolean initializeCardboardSdkNativeSafely() {
+        try {
+            return initializeCardboardSdkNative();
+        } catch (Throwable e) {
+            Log.e(TAG, "Cardboard SDK initialization failed", e);
+            return false;
+        }
+    }
+
+    private native boolean initializeCardboardSdkNative();
 
     // Launches the folder picker. Only called from onCreate, before any VR
     // session exists: launching it while already immersed makes Horizon OS
@@ -511,12 +573,12 @@ public class MainActivity extends NativeActivity {
 
     // The picker's answer: copy the kind's files over (on a thread of its
     // own), then switch to the new folder.
-    private void folderPicked(final int kind, final Uri treeUri) {
-        try {
-            getContentResolver().takePersistableUriPermission(treeUri,
-                    Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_GRANT_WRITE_URI_PERMISSION);
-        } catch (Exception e) {
-            Log.e(TAG, "takePersistableUriPermission failed", e);
+    private void folderPicked(final int kind, Intent data) {
+        final Uri treeUri = data.getData();
+        int grantedFlags = persistableTreeFlags(data);
+        int requiredFlags = Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_GRANT_WRITE_URI_PERMISSION;
+        if ((grantedFlags & requiredFlags) != requiredFlags ||
+                !takeTreePermission(treeUri, grantedFlags)) {
             folderStatus = "Can't use that folder - nothing changed";
             return;
         }

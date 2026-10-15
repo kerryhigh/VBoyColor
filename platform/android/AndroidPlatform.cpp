@@ -4,12 +4,48 @@
 #include <cardboard.h>
 
 #include <algorithm>
+#include <atomic>
+#include <chrono>
 #include <cstdint>
 #include <cstdio>
 #include <unistd.h>
+#include <android/log.h>
 
 namespace
 {
+    constexpr const char *kLogTag = "VBoyColor";
+    enum class CardboardSdkState { NotStarted, Pending, Ready, Failed };
+    std::atomic<CardboardSdkState> g_cardboardSdkState{CardboardSdkState::NotStarted};
+
+    void ClearJavaException(JNIEnv *env, const char *operation)
+    {
+        if (!env->ExceptionCheck())
+            return;
+        __android_log_print(ANDROID_LOG_ERROR, kLogTag, "%s raised a Java exception", operation);
+        env->ExceptionDescribe();
+        env->ExceptionClear();
+    }
+
+    jboolean InitializeCardboardOnJavaThread(JNIEnv *env, jobject activity)
+    {
+        JavaVM *vm = nullptr;
+        if (env->GetJavaVM(&vm) != JNI_OK || !vm)
+        {
+            g_cardboardSdkState.store(CardboardSdkState::Failed);
+            return JNI_FALSE;
+        }
+        Cardboard_initializeAndroid(vm, activity);
+        if (env->ExceptionCheck())
+        {
+            ClearJavaException(env, "Cardboard_initializeAndroid");
+            g_cardboardSdkState.store(CardboardSdkState::Failed);
+            return JNI_FALSE;
+        }
+        g_cardboardSdkState.store(CardboardSdkState::Ready);
+        __android_log_print(ANDROID_LOG_INFO, kLogTag, "Cardboard SDK initialized on the Activity thread");
+        return JNI_TRUE;
+    }
+
     // Detaches a thread Env() attached, when the thread ends.
     struct ThreadAttachment
     {
@@ -40,6 +76,72 @@ AndroidPlatform::AndroidPlatform(JavaVM *vm, jobject activityClazz, AAssetManage
     m_activity = env->NewGlobalRef(activityClazz);
 }
 
+bool AndroidPlatform::InitializeCardboardSdk()
+{
+    g_cardboardSdkState.store(CardboardSdkState::Pending);
+    m_cardboardInitDeadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+    JNIEnv *env = Env();
+    jclass activityClass = env->GetObjectClass(m_activity);
+    if (!activityClass || env->ExceptionCheck())
+    {
+        ClearJavaException(env, "GetObjectClass(MainActivity)");
+        g_cardboardSdkState.store(CardboardSdkState::Failed);
+        return false;
+    }
+
+    JNINativeMethod nativeMethod{
+        const_cast<char *>("initializeCardboardSdkNative"),
+        const_cast<char *>("()Z"),
+        reinterpret_cast<void *>(InitializeCardboardOnJavaThread)};
+    if (env->RegisterNatives(activityClass, &nativeMethod, 1) != JNI_OK || env->ExceptionCheck())
+    {
+        ClearJavaException(env, "RegisterNatives(Cardboard initializer)");
+        env->DeleteLocalRef(activityClass);
+        g_cardboardSdkState.store(CardboardSdkState::Failed);
+        return false;
+    }
+
+    jmethodID request = env->GetMethodID(activityClass, "requestCardboardSdkInitialization", "()Z");
+    if (!request || env->ExceptionCheck())
+    {
+        ClearJavaException(env, "GetMethodID(requestCardboardSdkInitialization)");
+        env->DeleteLocalRef(activityClass);
+        g_cardboardSdkState.store(CardboardSdkState::Failed);
+        return false;
+    }
+
+    const jboolean scheduled = env->CallBooleanMethod(m_activity, request);
+    const bool failed = env->ExceptionCheck();
+    if (failed)
+        ClearJavaException(env, "requestCardboardSdkInitialization");
+    env->DeleteLocalRef(activityClass);
+    if (failed || scheduled != JNI_TRUE)
+    {
+        g_cardboardSdkState.store(CardboardSdkState::Failed);
+        __android_log_print(ANDROID_LOG_ERROR, kLogTag, "Couldn't queue Cardboard initialization; keeping phone mode available");
+        return false;
+    }
+    return true;
+}
+
+bool AndroidPlatform::CardboardSdkInitializationComplete() const
+{
+    CardboardSdkState state = g_cardboardSdkState.load();
+    if (state == CardboardSdkState::Pending && std::chrono::steady_clock::now() >= m_cardboardInitDeadline)
+    {
+        CardboardSdkState pending = CardboardSdkState::Pending;
+        if (g_cardboardSdkState.compare_exchange_strong(pending, CardboardSdkState::Failed))
+            __android_log_print(ANDROID_LOG_ERROR, kLogTag, "Timed out waiting for the Cardboard UI-thread initializer");
+        state = g_cardboardSdkState.load();
+    }
+    return state != CardboardSdkState::Pending;
+}
+
+bool AndroidPlatform::SupportsCardboardViewer() const
+{
+    return m_phoneMode && g_cardboardSdkState.load() == CardboardSdkState::Ready;
+}
+
 bool AndroidPlatform::HasRomsFolder() const
 {
     JNIEnv *env = Env();
@@ -66,7 +168,7 @@ void AndroidPlatform::RequestChangeRomsFolder()
 
 void AndroidPlatform::RequestCardboardViewerScan()
 {
-    if (!m_phoneMode)
+    if (!SupportsCardboardViewer())
         return;
     CardboardQrCode_scanQrCodeAndSaveDeviceParams();
 }
