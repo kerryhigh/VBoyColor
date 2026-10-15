@@ -17,6 +17,22 @@ Linux, macOS, Android and the Nintendo Switch (homebrew).
 > of Nintendo. No games are included - use only ROMs you made from cartridges
 > you own.
 
+## Google Cardboard VR on Android
+
+**[Download the Android APK](https://github.com/kerryhigh/VBoyColor/releases/download/v1.0.0/VBoyColor-v1.0.0-quest-android-arm64.apk)**
+
+A clean phone install starts in Google Cardboard mode; existing saved display
+choices are preserved. The 64-bit Android APK runs on compatible phones in
+Cardboard viewers, as well as on Meta Quest. Scan your viewer's QR code in
+Settings → Screen → 3D (custom viewer profiles are supported), then start a
+game and place the phone in the viewer. The view stays fixed like the original
+Virtual Boy: there is no head tracking.
+
+The screen starts at 80% size. Adjust it in Settings → Screen → Cardboard
+screen size; lower values make the picture smaller and more comfortable for
+your viewer. Select + Start or Guide opens the in-view menu, and Android Back
+exits Cardboard mode. See [Cardboard setup](docs/CARDBOARD.md) for details.
+
 *Left: the original. Right: VBoy Color (Auto mode with the game's color
 pack).*
 

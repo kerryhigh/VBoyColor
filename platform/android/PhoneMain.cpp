@@ -800,6 +800,7 @@ void RunPhoneApp(android_app *app, AndroidPlatform &platform)
     bool ready = false; // the device, the renderer, the menu - once
     VkFence acquireFence = VK_NULL_HANDLE;
     bool settingsLoaded = false;
+    bool initialCardboardSettingsPendingSave = false;
     bool editRequested = false; // Settings > Touch controls > Edit
     std::string editGame;       // ...a game's own (Library: hold its card), or ""
 
@@ -885,7 +886,15 @@ void RunPhoneApp(android_app *app, AndroidPlatform &platform)
                     {
                         if (!settingsLoaded)
                         {
-                            settings.Load(platform);
+                            const bool hasSavedSettings = settings.Load(platform);
+                            // Cardboard is the useful first-run display on a
+                            // phone. Existing settings always win, so players
+                            // who chose 2D or another stereo layout keep it.
+                            if (!hasSavedSettings && platform.SupportsCardboardViewer())
+                            {
+                                settings.screen3D = static_cast<int>(Screen3D::GoogleCardboard);
+                                initialCardboardSettingsPendingSave = true;
+                            }
                             if (!platform.SupportsCardboardViewer() &&
                                 static_cast<Screen3D>(settings.screen3D) == Screen3D::GoogleCardboard)
                             {
@@ -928,6 +937,15 @@ void RunPhoneApp(android_app *app, AndroidPlatform &platform)
         }
         if (!ready || presenter.swapchain == VK_NULL_HANDLE || !state.resumed)
             continue;
+
+        // The SAF folder picker can finish after the native window is ready.
+        // Save the first-run Cardboard choice as soon as Android grants a ROM
+        // folder, without overwriting existing display preferences.
+        if (initialCardboardSettingsPendingSave && platform.HasRomsFolder())
+        {
+            settings.Save(platform);
+            initialCardboardSettingsPendingSave = false;
+        }
 
         // The window may have changed size without a new one (a resize).
         if (static_cast<uint32_t>(ANativeWindow_getWidth(state.window)) != presenter.extent.width ||
@@ -1016,11 +1034,27 @@ void RunPhoneApp(android_app *app, AndroidPlatform &platform)
 
         // A finger in the menu: tap to pick, drag to scroll (the first one).
         // (Not while it fades out for the touch editor: those fingers are the editor's.)
-        if (appMenu.IsVisible() && !editing && !cardboardRequested)
+        if (appMenu.IsVisible() && !editing)
         {
             const Finger *first = state.fingers.empty() ? nullptr : &state.fingers.begin()->second;
-            const float mx = first ? (first->x - menuX) / menuScale : 0.0f, my = first ? (first->y - menuY) / menuScale : 0.0f;
-            appMenu.SetPointer(first != nullptr, mx, my, first && !first->up, 0.0f, false, true);
+            float pointerMenuX = menuX;
+            float pointerMenuY = menuY;
+            bool pointerAvailable = first != nullptr;
+            if (cardboardRequested)
+            {
+                // The menu is a duplicated plane. Allow taps on the left-eye
+                // copy when the phone is outside the viewer, while the right
+                // copy and the hidden gameplay overlay remain non-interactive.
+                const float eyeWidth = std::floor(w / 2.0f);
+                pointerMenuX = std::floor((eyeWidth - kMenuWidth * menuScale) / 2.0f);
+                pointerMenuY = std::floor((h - kMenuHeight * menuScale) / 2.0f);
+                pointerAvailable = first && first->x >= pointerMenuX && first->x <= pointerMenuX + kMenuWidth * menuScale &&
+                                   first->x < eyeWidth && first->y >= pointerMenuY &&
+                                   first->y <= pointerMenuY + kMenuHeight * menuScale;
+            }
+            const float mx = pointerAvailable ? (first->x - pointerMenuX) / menuScale : 0.0f;
+            const float my = pointerAvailable ? (first->y - pointerMenuY) / menuScale : 0.0f;
+            appMenu.SetPointer(pointerAvailable, mx, my, pointerAvailable && !first->up, 0.0f, false, true);
         }
         else
             appMenu.SetPointer(false, 0, 0, false);
