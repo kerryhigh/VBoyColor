@@ -13,13 +13,10 @@ namespace
 {
     constexpr const char *kSettingsFileName = "settings.dat";
 
-    // Versions 12 to 17 only appended fields (selectedShadePalette,
-    // passthrough, then the library's), so an older file's AppSettings bytes are exactly a
-    // prefix of today's layout - copying just that much keeps everything the
-    // user had set up (button mapping, screen placement, palette) and leaves
-    // the newer fields at their defaults. 18 has 17's layout (only the
-    // screen look's default changed); 19 appended screen3D, 20 checkForUpdates,
-    // 21 gamepadByPosition, 22 the hotkeys and paintingTools.
+    // The versions below used append-only layouts. Copying an older prefix
+    // keeps the player's existing settings and leaves newer fields at their
+    // defaults. Version 27 included cardboardScale; version 28 changes its
+    // untouched default without changing the stored layout.
     size_t PrefixCompatibleSize(int version)
     {
         switch (version)
@@ -53,6 +50,10 @@ namespace
             return offsetof(AppSettings, touchControls);
         case 25:
             return offsetof(AppSettings, unused26);
+        case 26:
+            return offsetof(AppSettings, cardboardScale);
+        case 27:
+            return offsetof(AppSettings, cardboardScale) + sizeof(float);
         default:
             return 0;
         }
@@ -122,6 +123,11 @@ bool AppSettings::LoadBytes(const std::vector<uint8_t> &bytes)
         // The LED look became the default in 18 - Sharp was just the old one.
         if (version < 18 && migrated.screenLook == static_cast<int>(ScreenLook::Sharp))
             migrated.screenLook = static_cast<int>(ScreenLook::Led);
+        // Version 28 makes the default Cardboard image smaller for a more
+        // comfortable viewing distance. Upgrade the old untouched default,
+        // while keeping any scale the player had already adjusted.
+        if (version == 27 && migrated.cardboardScale == 1.0f)
+            migrated.cardboardScale = AppSettings::kDefaultCardboardScale;
         *this = migrated;
         return true;
     }

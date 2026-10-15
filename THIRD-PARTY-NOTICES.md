@@ -20,6 +20,7 @@ logo (`assets/logo/`) is Juan's own artwork.
 | [Beetle VB](https://github.com/libretro/beetle-vb-libretro) (libretro's fork of Mednafen's Virtual Boy emulation) | the emulator core | GPL-2.0-or-later (`third_party/beetle-vb-libretro/COPYING`) |
 | libretro-common (inside Beetle VB) | core interface | MIT-style (headers in `third_party/beetle-vb-libretro/libretro-common/`) |
 | [OpenXR SDK](https://github.com/KhronosGroup/OpenXR-SDK) loader | VR runtime access | Apache-2.0 (`licenses/Apache-2.0.txt`) |
+| [Google Cardboard SDK](https://github.com/googlevr/cardboard) v1.34.0 | Android phone QR viewer calibration and Vulkan lens distortion | Apache-2.0 (`third_party/cardboard/LICENSE`) |
 | [Vulkan-Headers](https://github.com/KhronosGroup/Vulkan-Headers) | Vulkan API definitions | Apache-2.0 or MIT (`licenses/Vulkan-Headers.txt`) |
 | [volk](https://github.com/zeux/volk) | Vulkan loader | MIT (`licenses/MIT-volk.txt`) |
 | [FreeType](https://freetype.org) | font rendering | FreeType License (`licenses/FTL-FreeType.txt`) |
@@ -49,6 +50,11 @@ Portions of this software are copyright © 2023 The FreeType Project
 [glslang](https://github.com/KhronosGroup/glslang) compiles the shaders on
 the PC build (BSD-3-Clause and others, see its repository). Gradle and the
 Android SDK/NDK build the Quest app.
+
+The pinned Cardboard SDK Gradle module also declares AndroidX AppCompat,
+Google Play Services Vision, Material Components, protobuf-javalite and
+jspecify. Gradle resolves those dependencies from Google's Maven repository
+and Maven Central; their notices remain with their respective artifacts.
 
 ## Ideas
 

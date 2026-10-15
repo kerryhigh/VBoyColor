@@ -4,6 +4,18 @@ buildscript {
         mavenCentral()
     }
     dependencies {
-        classpath 'com.android.tools.build:gradle:8.5.2'
+        classpath 'com.android.tools.build:gradle:8.13.1'
+        classpath 'com.google.protobuf:protobuf-gradle-plugin:0.10.0'
+    }
+}
+
+// The upstream Cardboard SDK is built as its official Gradle library module.
+// Its standalone project expects proto/ at the root; in this parent project
+// the protobuf schema remains in the SDK submodule.
+subprojects { child ->
+    if (child.name == "cardboard-sdk") {
+        child.afterEvaluate {
+            child.android.sourceSets.main.proto.srcDirs = [rootProject.file("../third_party/cardboard/proto")]
+        }
     }
 }

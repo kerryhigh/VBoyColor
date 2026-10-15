@@ -242,7 +242,7 @@ void android_main(struct android_app *app)
             // resume.
             const bool readyToInit = state.resumed && platform.HasRomsFolder();
             const int timeoutMs = (!readyToInit && (!initialized || !xrApp.IsSessionRunning())) ? -1 : 0;
-            if (ALooper_pollAll(timeoutMs, nullptr, &events, reinterpret_cast<void **>(&source)) < 0)
+            if (ALooper_pollOnce(timeoutMs, nullptr, &events, reinterpret_cast<void **>(&source)) < 0)
                 break;
             if (source)
                 source->process(app, source);

@@ -61,6 +61,11 @@ public:
 
     // Whether this platform lets the player choose them.
     virtual bool SupportsDataFolders() const { return false; }
+    // Google Cardboard is a phone-only Android display path. Other platforms
+    // keep the setting and QR scanner out of their menus.
+    virtual bool SupportsCardboardViewer() const { return false; }
+    virtual void RequestCardboardViewerScan() {}
+    virtual void ShowCardboardMessage(const std::string & /*message*/) {}
     // What the menu shows for a kind's folder: its path or name, or "" for
     // the default place (inside the games folder).
     virtual std::string DataFolderLabel(DataKind /*kind*/) const { return ""; }

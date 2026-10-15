@@ -35,6 +35,7 @@ public:
     void Initialize(VkDevice device, VkPhysicalDevice physicalDevice, VkQueue queue, uint32_t queueFamilyIndex,
                     VkCommandPool commandPool, VkCommandBuffer commandBuffer);
     void Shutdown();
+    VkCommandBuffer GetCommandBuffer() const { return m_commandBuffer; }
 
     // Bakes a glyph atlas via FreeType (ported from FontMaster.cpp's
     // LoadFont) and uploads it as an R8 Vulkan texture. See
@@ -67,7 +68,11 @@ public:
     // pipelines are tied to one format for the process lifetime).
     // sampleEncoded: shaders read it back as stored (an _SRGB format's
     // encoded values, not decoded to linear) - see screen_filter.frag.
-    UiImageHandle CreateRenderTexture(uint32_t width, uint32_t height, VkFormat format, bool sampleEncoded = false);
+    UiImageHandle CreateRenderTexture(uint32_t width, uint32_t height, VkFormat format, bool sampleEncoded = false,
+                                      bool generalLayout = false);
+    // The image handle is used by native renderers that sample an offscreen
+    // target directly (Cardboard's Vulkan distortion renderer).
+    VkImage GetRenderTextureImage(UiImageHandle handle) const;
 
     // Destroys and recreates a CreateRenderTexture texture at a new size in
     // place - the handle stays valid (same index), and its descriptor set is
@@ -100,7 +105,8 @@ public:
     // Begins recording into the given target image (e.g. a quad
     // composition-layer swapchain image). All Draw* calls happen between
     // BeginFrame/EndFrame.
-    void BeginFrame(VkImage image, VkFormat format, uint32_t width, uint32_t height, const XrColor4f &clearColor);
+    void BeginFrame(VkImage image, VkFormat format, uint32_t width, uint32_t height, const XrColor4f &clearColor,
+                    bool presentImage = false);
 
     // Like BeginFrame, but targets a texture created by CreateRenderTexture
     // and leaves it in a shader-readable layout when the render pass ends
@@ -119,6 +125,11 @@ public:
     // target's own pixel size for both (the ordinary 1:1 behaviour).
     void BeginOffscreenFrame(UiImageHandle target, const XrColor4f &clearColor,
                              float logicalWidth = 0.0f, float logicalHeight = 0.0f);
+    // Begins a command buffer/render pass prepared by a platform renderer.
+    // Cardboard's renderer draws directly into this pass after the SDK has
+    // recorded its distortion meshes.
+    void BeginCardboardFrame(VkFramebuffer framebuffer, VkRenderPass renderPass, uint32_t width, uint32_t height,
+                             const XrColor4f &clearColor);
 
     // cornerRadiusPx > 0 rounds all four corners (antialiased); 0 (default)
     // is a plain sharp-cornered rect.
@@ -245,6 +256,7 @@ private:
         VkSampler sampler{VK_NULL_HANDLE};
         VkDescriptorSet descriptorSet{VK_NULL_HANDLE};
         bool sampleEncoded = false; // (see CreateRenderTexture)
+        bool generalLayout = false;
 
         // Only set for images created by CreateStreamingImage - see its doc
         // comment. stagingMapped stays non-null for the image's whole
@@ -261,7 +273,8 @@ private:
     };
 
     VkRenderPass GetOrCreateRenderPass(VkFormat format);
-    VkRenderPass GetOrCreateOffscreenRenderPass(VkFormat format);
+    VkRenderPass GetOrCreatePresentRenderPass(VkFormat format);
+    VkRenderPass GetOrCreateOffscreenRenderPass(VkFormat format, bool generalLayout = false);
     void EnsurePipelines(VkFormat format);
     // Creates the image/memory/view/sampler for a device-local color-
     // attachment+sampled texture (shared by CreateRenderTexture and
@@ -289,12 +302,16 @@ private:
 
     VkRenderPass m_renderPass{VK_NULL_HANDLE};
     VkFormat m_renderPassFormat{VK_FORMAT_UNDEFINED};
+    VkRenderPass m_presentRenderPass{VK_NULL_HANDLE};
+    VkFormat m_presentRenderPassFormat{VK_FORMAT_UNDEFINED};
     // finalLayout = SHADER_READ_ONLY_OPTIMAL instead of m_renderPass's
     // COLOR_ATTACHMENT_OPTIMAL - used only for BeginOffscreenFrame targets.
     // Render-pass-compatible with m_renderPass when formats match, so the
     // same pipelines (created against m_renderPass) work with either.
     VkRenderPass m_offscreenRenderPass{VK_NULL_HANDLE};
     VkFormat m_offscreenRenderPassFormat{VK_FORMAT_UNDEFINED};
+    VkRenderPass m_generalOffscreenRenderPass{VK_NULL_HANDLE};
+    VkFormat m_generalOffscreenRenderPassFormat{VK_FORMAT_UNDEFINED};
     std::unordered_map<VkImage, RenderTarget> m_renderTargets;
 
     VkBuffer m_unitQuadVertexBuffer{VK_NULL_HANDLE};

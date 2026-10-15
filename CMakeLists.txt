@@ -340,6 +340,13 @@ add_dependencies(vbgo_app vbgo_version)
 
 if(ANDROID)
     target_compile_definitions(vbgo_app PUBLIC XR_USE_PLATFORM_ANDROID)
+    if(NOT CARDBOARD_LIB_DIR OR NOT CARDBOARD_INCLUDE_DIR)
+        message(FATAL_ERROR "Android builds require the Cardboard SDK AAR extraction (CARDBOARD_LIB_DIR and CARDBOARD_INCLUDE_DIR). Build through android/gradlew.")
+    endif()
+    add_library(cardboard_sdk SHARED IMPORTED GLOBAL)
+    set_target_properties(cardboard_sdk PROPERTIES
+        IMPORTED_LOCATION "${CARDBOARD_LIB_DIR}/${ANDROID_ABI}/libGfxPluginCardboard.so")
+    target_include_directories(vbgo_app PUBLIC "${CARDBOARD_INCLUDE_DIR}")
     target_sources(vbgo_app PRIVATE platform/android/AndroidPlatform.cpp)
 else()
     target_sources(vbgo_app PRIVATE platform/desktop/DesktopPlatform.cpp platform/desktop/DesktopUpdate.cpp)
@@ -356,7 +363,7 @@ if(ANDROID)
         platform/android/AndroidMain.cpp
         platform/android/PhoneMain.cpp
     )
-    target_link_libraries(vboycolor PRIVATE vbgo_app android_native_app_glue ${ANDROID_LIB} ${LOG_LIB})
+    target_link_libraries(vboycolor PRIVATE vbgo_app android_native_app_glue ${ANDROID_LIB} ${LOG_LIB} cardboard_sdk)
     target_include_directories(vboycolor PRIVATE ${ANDROID_NDK}/sources/android/native_app_glue)
     # ANativeActivity_onCreate (in android_native_app_glue.c) is only looked
     # up dynamically by the OS, never called from our own code, so the

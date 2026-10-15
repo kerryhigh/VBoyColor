@@ -12,13 +12,13 @@ One CMake project builds every version:
 No Vulkan SDK is needed anywhere: Vulkan is loaded at runtime through `volk`,
 and the shaders are compiled by glslang's C++ API, fetched and built as part
 of the project. CMake fetches its other dependencies (Vulkan-Headers, volk,
-OpenXR SDK, FreeType, GLFW) on the first configure. The emulator core is a
-git submodule:
+OpenXR SDK, FreeType, GLFW) on the first configure. The emulator core and
+Google Cardboard SDK are pinned git submodules:
 
 ```
 git clone --recursive https://github.com/yuk27/VBoyColor
 # or, in an existing clone:
-git submodule update --init
+git submodule update --init --recursive
 ```
 
 Every push is also built by GitHub Actions (`.github/workflows/build.yml`):
@@ -88,7 +88,7 @@ driver works (Mesa's lavapipe too, without a GPU).
 
 ## Android (Quest, phones and tablets)
 
-Needs the Android SDK (compileSdk 34, build-tools 34.0.0), NDK 23.2.8568313,
+Needs the Android SDK (platform 35, build-tools 35.0.0), NDK 29.0.14206865,
 CMake 3.22.1 and a JDK 17+ (Android Studio's own works:
 `JAVA_HOME="C:\Program Files\Android\Android Studio\jbr"`).
 
@@ -106,6 +106,11 @@ cd android
 adb install -r app/build/outputs/apk/debug/app-debug.apk
 adb shell am start -n io.github.yuk27.vboycolor/android.app.NativeActivity
 ```
+
+Gradle builds the pinned Google Cardboard SDK v1.34.0 as a library, packages
+its QR scanner and Java APIs, and extracts its native Vulkan distortion
+renderer for CMake. The first build downloads the SDK's declared Maven
+dependencies. See [Cardboard setup and testing](CARDBOARD.md).
 
 The native code is optimized in debug builds too (also when Android Studio's
 Run button builds them) - unoptimized, the emulator and the coloring run 2-3x

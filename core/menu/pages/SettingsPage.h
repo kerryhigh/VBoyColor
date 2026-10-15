@@ -35,6 +35,7 @@ public:
 
 private:
     static constexpr float kColorStep = 0.05f; // matches FrontendGo's COLOR_STEP_SIZE
+    static constexpr float kCardboardScaleStep = 0.05f;
 
     // The Color Mode row's choices - which kind of palette the Color
     // Palette row cycles: Tint = flat single color (kPredefColors + custom
@@ -59,6 +60,7 @@ private:
     void ChangeLook(int delta);
     void Change3D(int delta);       // the kind (off, side by side, top and bottom, glasses)
     void Change3DFormat(int delta); // the kind's format / glasses
+    void ChangeCardboardScale(float delta);
 
     std::shared_ptr<MenuList::Entry> m_colorModeEntry;
     std::shared_ptr<MenuList::Entry> m_paletteEntry;
@@ -67,6 +69,8 @@ private:
     std::shared_ptr<MenuList::Entry> m_sizeEntry; // (the PC window only)
     std::shared_ptr<MenuList::Entry> m_threeDEntry;       // (flat screens only)
     std::shared_ptr<MenuList::Entry> m_threeDFormatEntry; // (its second row - hidden while 3D is off)
+    std::shared_ptr<MenuList::Entry> m_cardboardScanEntry;
+    std::shared_ptr<MenuList::Entry> m_cardboardScaleEntry;
     std::shared_ptr<MenuList::Entry> m_folderEntries[kDataKindCount]; // (where Platform::SupportsDataFolders)
     std::shared_ptr<MenuList::Entry> m_colorREntry;
     std::shared_ptr<MenuList::Entry> m_colorGEntry;

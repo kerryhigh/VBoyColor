@@ -19,6 +19,7 @@
 #include "menu/AppMenu.h"
 #include "menu/VirtualBoyFrame.h"
 #include "menu/pages/AppMenuLayout.h"
+#include <cardboard.h>
 
 #include <android/configuration.h>
 #include <android/input.h>
@@ -306,7 +307,7 @@ namespace
         {
             int events = 0;
             android_poll_source *source = nullptr;
-            if (ALooper_pollAll(-1, nullptr, &events, reinterpret_cast<void **>(&source)) >= 0 && source)
+            if (ALooper_pollOnce(-1, nullptr, &events, reinterpret_cast<void **>(&source)) >= 0 && source)
                 source->process(app, source);
         }
     }
@@ -322,6 +323,7 @@ namespace
         VkSurfaceFormatKHR format{VK_FORMAT_UNDEFINED, VK_COLOR_SPACE_SRGB_NONLINEAR_KHR};
         VkExtent2D extent{};
         std::vector<VkImage> images;
+        uint64_t generation = 0;
 
         VkSurfaceKHR CreateSurface(VkInstance instance, ANativeWindow *window)
         {
@@ -384,6 +386,7 @@ namespace
             if (swapchain != VK_NULL_HANDLE)
                 vkDestroySwapchainKHR(device, swapchain, nullptr);
             swapchain = fresh;
+            ++generation;
             ui.InvalidateRenderTargets(); // (see pc2d's recreateSwapchain)
             uint32_t count = 0;
             vkGetSwapchainImagesKHR(device, swapchain, &count, nullptr);
@@ -418,10 +421,348 @@ namespace
         x = areaX + std::floor((w - sw) / 2.0f);
         y = areaY + std::floor((h - sh) / 2.0f);
     }
+
+    // SDK-backed fixed-view Cardboard presentation. The emulator's single
+    // colorized SBS texture is drawn once into the two atlas halves, then the
+    // official per-viewer meshes distort those halves into the display.
+    // This class never creates a head tracker or reads device sensors.
+    class CardboardOutput
+    {
+        struct DepthTarget
+        {
+            VkImage image{VK_NULL_HANDLE};
+            VkDeviceMemory memory{VK_NULL_HANDLE};
+            VkImageView view{VK_NULL_HANDLE};
+        };
+
+    public:
+        void Ensure(UiRenderer &ui, VulkanRenderer &renderer, Presenter &presenter, AndroidPlatform &platform)
+        {
+            if (presenter.extent.width == 0 || presenter.extent.height == 0)
+                throw std::runtime_error("Cardboard needs a non-empty landscape display");
+            const uint32_t width = presenter.extent.width;
+            const uint32_t height = presenter.extent.height;
+            if (!m_atlas.IsValid())
+                m_atlas = ui.CreateRenderTexture(width, height, VK_FORMAT_R8G8B8A8_SRGB, false, true);
+            else
+                ui.ResizeRenderTexture(m_atlas, width, height);
+
+            const bool swapchainChanged = !m_displayPass || m_swapchainGeneration != presenter.generation;
+            if (swapchainChanged)
+            {
+                DestroyDistortion(renderer.GetDevice());
+                DestroyDisplayTargets(renderer.GetDevice());
+                CreateDisplayTargets(renderer, presenter);
+                m_swapchainGeneration = presenter.generation;
+            }
+
+            const int changedCount = CardboardQrCode_getDeviceParamsChangedCount();
+            if (!m_lens || m_width != width || m_height != height || changedCount != m_paramsChangedCount || swapchainChanged)
+                CreateDistortion(renderer, presenter, width, height, changedCount, platform);
+        }
+
+        UiImageHandle Atlas() const { return m_atlas; }
+        bool IsActive() const { return m_displayPass != VK_NULL_HANDLE || m_distortion != nullptr || m_lens != nullptr; }
+
+        void Distort(UiRenderer &ui, uint32_t imageIndex, uint32_t width, uint32_t height)
+        {
+            if (!m_distortion || imageIndex >= m_framebuffers.size())
+                throw std::runtime_error("Cardboard distortion renderer is not ready");
+
+            const VkImage atlasImage = ui.GetRenderTextureImage(m_atlas);
+            if (atlasImage == VK_NULL_HANDLE)
+                throw std::runtime_error("Cardboard eye texture is unavailable");
+            m_leftEye.texture = reinterpret_cast<uint64_t>(atlasImage);
+            m_rightEye.texture = m_leftEye.texture;
+
+            ui.BeginCardboardFrame(m_framebuffers[imageIndex], m_displayPass, width, height,
+                                   XrColor4f{0.0f, 0.0f, 0.0f, 1.0f});
+            VkRenderPass renderPass = m_displayPass;
+            VkCommandBuffer commandBuffer = ui.GetCommandBuffer();
+            CardboardVulkanDistortionRendererTarget target{};
+            target.vk_render_pass = reinterpret_cast<uint64_t>(&renderPass);
+            target.vk_command_buffer = reinterpret_cast<uint64_t>(&commandBuffer);
+            target.swapchain_image_index = imageIndex;
+            CardboardDistortionRenderer_renderEyeToDisplay(
+                m_distortion, reinterpret_cast<uint64_t>(&target), 0, 0, static_cast<int>(width), static_cast<int>(height),
+                &m_leftEye, &m_rightEye);
+            ui.EndFrame();
+        }
+
+        void Destroy(VkDevice device)
+        {
+            if (device != VK_NULL_HANDLE)
+                vkDeviceWaitIdle(device);
+            DestroyDistortion(device);
+            DestroyDisplayTargets(device);
+            m_swapchainGeneration = 0;
+            m_width = m_height = 0;
+        }
+
+    private:
+        void DestroyDistortion(VkDevice device)
+        {
+            if (m_distortion)
+            {
+                CardboardDistortionRenderer_destroy(m_distortion);
+                m_distortion = nullptr;
+            }
+            if (m_lens)
+            {
+                CardboardLensDistortion_destroy(m_lens);
+                m_lens = nullptr;
+            }
+            if (device != VK_NULL_HANDLE)
+                vkDeviceWaitIdle(device);
+        }
+
+        void DestroyDisplayTargets(VkDevice device)
+        {
+            if (device != VK_NULL_HANDLE)
+            {
+                for (VkFramebuffer framebuffer : m_framebuffers)
+                    if (framebuffer)
+                        vkDestroyFramebuffer(device, framebuffer, nullptr);
+                for (VkImageView view : m_colorViews)
+                    if (view)
+                        vkDestroyImageView(device, view, nullptr);
+                for (DepthTarget &depth : m_depthTargets)
+                {
+                    if (depth.view)
+                        vkDestroyImageView(device, depth.view, nullptr);
+                    if (depth.image)
+                        vkDestroyImage(device, depth.image, nullptr);
+                    if (depth.memory)
+                        vkFreeMemory(device, depth.memory, nullptr);
+                }
+                if (m_displayPass)
+                    vkDestroyRenderPass(device, m_displayPass, nullptr);
+            }
+            m_framebuffers.clear();
+            m_colorViews.clear();
+            m_depthTargets.clear();
+            m_displayPass = VK_NULL_HANDLE;
+        }
+
+        static uint32_t FindMemoryType(VkPhysicalDevice physical, uint32_t typeBits, VkMemoryPropertyFlags wanted)
+        {
+            VkPhysicalDeviceMemoryProperties properties{};
+            vkGetPhysicalDeviceMemoryProperties(physical, &properties);
+            for (uint32_t i = 0; i < properties.memoryTypeCount; ++i)
+                if ((typeBits & (1u << i)) && (properties.memoryTypes[i].propertyFlags & wanted) == wanted)
+                    return i;
+            throw std::runtime_error("No device-local Vulkan memory type for Cardboard depth buffer");
+        }
+
+        void CreateDisplayTargets(VulkanRenderer &renderer, const Presenter &presenter)
+        {
+            VkPhysicalDevice physical = renderer.GetPhysicalDevice();
+            VkDevice device = renderer.GetDevice();
+            VkFormat depthFormat = VK_FORMAT_D32_SFLOAT;
+            VkFormatProperties formatProperties{};
+            vkGetPhysicalDeviceFormatProperties(physical, depthFormat, &formatProperties);
+            if (!(formatProperties.optimalTilingFeatures & VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT))
+            {
+                depthFormat = VK_FORMAT_D24_UNORM_S8_UINT;
+                vkGetPhysicalDeviceFormatProperties(physical, depthFormat, &formatProperties);
+            }
+            if (!(formatProperties.optimalTilingFeatures & VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT))
+                throw std::runtime_error("This Vulkan device has no supported Cardboard depth format");
+            m_depthFormat = depthFormat;
+
+            VkAttachmentDescription attachments[2]{};
+            attachments[0].format = presenter.format.format;
+            attachments[0].samples = VK_SAMPLE_COUNT_1_BIT;
+            attachments[0].loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+            attachments[0].storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+            attachments[0].stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+            attachments[0].stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+            attachments[0].initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+            attachments[0].finalLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+            attachments[1].format = depthFormat;
+            attachments[1].samples = VK_SAMPLE_COUNT_1_BIT;
+            attachments[1].loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+            attachments[1].storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+            attachments[1].stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+            attachments[1].stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+            attachments[1].initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+            attachments[1].finalLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+            VkAttachmentReference colorRef{0, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL};
+            VkAttachmentReference depthRef{1, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL};
+            VkSubpassDescription subpass{};
+            subpass.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
+            subpass.colorAttachmentCount = 1;
+            subpass.pColorAttachments = &colorRef;
+            subpass.pDepthStencilAttachment = &depthRef;
+            VkSubpassDependency dependency{};
+            dependency.srcSubpass = VK_SUBPASS_EXTERNAL;
+            dependency.dstSubpass = 0;
+            dependency.srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT;
+            dependency.dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT;
+            dependency.srcAccessMask = 0;
+            dependency.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+            VkRenderPassCreateInfo passInfo{VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO};
+            passInfo.attachmentCount = 2;
+            passInfo.pAttachments = attachments;
+            passInfo.subpassCount = 1;
+            passInfo.pSubpasses = &subpass;
+            passInfo.dependencyCount = 1;
+            passInfo.pDependencies = &dependency;
+            if (vkCreateRenderPass(device, &passInfo, nullptr, &m_displayPass) != VK_SUCCESS)
+                throw std::runtime_error("Couldn't create Cardboard Vulkan render pass");
+
+            m_colorViews.reserve(presenter.images.size());
+            m_depthTargets.resize(presenter.images.size());
+            m_framebuffers.reserve(presenter.images.size());
+            for (size_t i = 0; i < presenter.images.size(); ++i)
+            {
+                VkImageViewCreateInfo colorViewInfo{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
+                colorViewInfo.image = presenter.images[i];
+                colorViewInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
+                colorViewInfo.format = presenter.format.format;
+                colorViewInfo.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+                VkImageView colorView = VK_NULL_HANDLE;
+                if (vkCreateImageView(device, &colorViewInfo, nullptr, &colorView) != VK_SUCCESS)
+                    throw std::runtime_error("Couldn't create Cardboard swapchain image view");
+                m_colorViews.push_back(colorView);
+
+                DepthTarget &depth = m_depthTargets[i];
+                VkImageCreateInfo imageInfo{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
+                imageInfo.imageType = VK_IMAGE_TYPE_2D;
+                imageInfo.format = depthFormat;
+                imageInfo.extent = {presenter.extent.width, presenter.extent.height, 1};
+                imageInfo.mipLevels = 1;
+                imageInfo.arrayLayers = 1;
+                imageInfo.samples = VK_SAMPLE_COUNT_1_BIT;
+                imageInfo.tiling = VK_IMAGE_TILING_OPTIMAL;
+                imageInfo.usage = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT;
+                imageInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+                imageInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+                if (vkCreateImage(device, &imageInfo, nullptr, &depth.image) != VK_SUCCESS)
+                    throw std::runtime_error("Couldn't create Cardboard depth image");
+                VkMemoryRequirements requirements{};
+                vkGetImageMemoryRequirements(device, depth.image, &requirements);
+                VkMemoryAllocateInfo allocation{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
+                allocation.allocationSize = requirements.size;
+                allocation.memoryTypeIndex = FindMemoryType(physical, requirements.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+                if (vkAllocateMemory(device, &allocation, nullptr, &depth.memory) != VK_SUCCESS ||
+                    vkBindImageMemory(device, depth.image, depth.memory, 0) != VK_SUCCESS)
+                    throw std::runtime_error("Couldn't allocate Cardboard depth image memory");
+                VkImageViewCreateInfo depthViewInfo{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
+                depthViewInfo.image = depth.image;
+                depthViewInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
+                depthViewInfo.format = depthFormat;
+                depthViewInfo.subresourceRange = {VK_IMAGE_ASPECT_DEPTH_BIT, 0, 1, 0, 1};
+                if (vkCreateImageView(device, &depthViewInfo, nullptr, &depth.view) != VK_SUCCESS)
+                    throw std::runtime_error("Couldn't create Cardboard depth image view");
+                const VkImageView views[] = {colorView, depth.view};
+                VkFramebufferCreateInfo framebufferInfo{VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO};
+                framebufferInfo.renderPass = m_displayPass;
+                framebufferInfo.attachmentCount = 2;
+                framebufferInfo.pAttachments = views;
+                framebufferInfo.width = presenter.extent.width;
+                framebufferInfo.height = presenter.extent.height;
+                framebufferInfo.layers = 1;
+                VkFramebuffer framebuffer = VK_NULL_HANDLE;
+                if (vkCreateFramebuffer(device, &framebufferInfo, nullptr, &framebuffer) != VK_SUCCESS)
+                    throw std::runtime_error("Couldn't create Cardboard display framebuffer");
+                m_framebuffers.push_back(framebuffer);
+            }
+        }
+
+        void CreateDistortion(VulkanRenderer &renderer, const Presenter &presenter, uint32_t width, uint32_t height,
+                              int changedCount, AndroidPlatform &platform)
+        {
+            DestroyDistortion(renderer.GetDevice());
+            uint8_t *params = nullptr;
+            int size = 0;
+            CardboardQrCode_getSavedDeviceParams(&params, &size);
+            bool ownedParams = true;
+            const bool usingDefault = size <= 0 || params == nullptr;
+            if (usingDefault)
+            {
+                if (params)
+                    CardboardQrCode_destroy(params);
+                params = nullptr;
+                CardboardQrCode_getCardboardV1DeviceParams(&params, &size);
+                ownedParams = false;
+            }
+            if (!params || size <= 0)
+                throw std::runtime_error("Cardboard couldn't load a viewer profile");
+
+            CardboardLensDistortion *lens = CardboardLensDistortion_create(params, size, static_cast<int>(width),
+                                                                           static_cast<int>(height));
+            if (ownedParams)
+                CardboardQrCode_destroy(params);
+            if (!lens)
+                throw std::runtime_error("Cardboard couldn't create optical calibration for this display");
+
+            VkPhysicalDevice physical = renderer.GetPhysicalDevice();
+            VkDevice device = renderer.GetDevice();
+            VkSwapchainKHR swapchain = presenter.swapchain;
+            CardboardVulkanDistortionRendererConfig config{};
+            config.physical_device = reinterpret_cast<uint64_t>(&physical);
+            config.logical_device = reinterpret_cast<uint64_t>(&device);
+            config.vk_swapchain = reinterpret_cast<uint64_t>(&swapchain);
+            CardboardDistortionRenderer *distortion = CardboardVulkanDistortionRenderer_create(&config);
+            if (!distortion)
+            {
+                CardboardLensDistortion_destroy(lens);
+                throw std::runtime_error("Cardboard couldn't create its Vulkan distortion renderer");
+            }
+
+            CardboardMesh leftMesh{}, rightMesh{};
+            CardboardLensDistortion_getDistortionMesh(lens, kLeft, &leftMesh);
+            CardboardLensDistortion_getDistortionMesh(lens, kRight, &rightMesh);
+            if (!leftMesh.vertices || !rightMesh.vertices || leftMesh.n_indices <= 0 || rightMesh.n_indices <= 0)
+            {
+                CardboardDistortionRenderer_destroy(distortion);
+                CardboardLensDistortion_destroy(lens);
+                throw std::runtime_error("Cardboard returned an empty lens distortion mesh");
+            }
+            CardboardDistortionRenderer_setMesh(distortion, &leftMesh, kLeft);
+            CardboardDistortionRenderer_setMesh(distortion, &rightMesh, kRight);
+
+            m_lens = lens;
+            m_distortion = distortion;
+            m_width = width;
+            m_height = height;
+            m_paramsChangedCount = changedCount;
+            m_leftEye.left_u = 0.0f;
+            m_leftEye.right_u = 0.5f;
+            m_leftEye.top_v = 1.0f;
+            m_leftEye.bottom_v = 0.0f;
+            m_rightEye = m_leftEye;
+            m_rightEye.left_u = 0.5f;
+            m_rightEye.right_u = 1.0f;
+            if (usingDefault && !m_defaultProfileNoticeShown)
+            {
+                platform.ShowCardboardMessage("Using Cardboard's default viewer profile. Scan your viewer QR code for accurate optics.");
+                m_defaultProfileNoticeShown = true;
+            }
+        }
+
+        UiImageHandle m_atlas;
+        CardboardLensDistortion *m_lens = nullptr;
+        CardboardDistortionRenderer *m_distortion = nullptr;
+        CardboardEyeTextureDescription m_leftEye{}, m_rightEye{};
+        VkRenderPass m_displayPass{VK_NULL_HANDLE};
+        VkFormat m_depthFormat{VK_FORMAT_UNDEFINED};
+        std::vector<VkImageView> m_colorViews;
+        std::vector<DepthTarget> m_depthTargets;
+        std::vector<VkFramebuffer> m_framebuffers;
+        uint64_t m_swapchainGeneration = 0;
+        uint32_t m_width = 0, m_height = 0;
+        int m_paramsChangedCount = -1;
+        bool m_defaultProfileNoticeShown = false;
+    };
 } // namespace
 
 void RunPhoneApp(android_app *app, AndroidPlatform &platform)
 {
+    platform.SetPhoneMode(true);
+    if (!platform.InitializeCardboardSdk())
+        platform.ShowCardboardMessage("Google Cardboard isn't available on this launch. The normal phone display will still work.");
     PhoneState state;
     app->userData = &state;
     platform.SetCanQuit(true); // (the menu's Quit - a TV with a gamepad has no other way out)
@@ -445,12 +786,17 @@ void RunPhoneApp(android_app *app, AndroidPlatform &platform)
     float vbFrameAlpha = 1.0f;
     Presenter presenter;
     presenter.renderer = &renderer;
+    CardboardOutput cardboard;
     // What already happened before this function took the events over (the
     // VR app falls back here when the headset runtime can't start).
     state.resumed = app->activityState == APP_CMD_RESUME;
     state.window = app->window;
     state.windowChanged = app->window != nullptr;
-    state.releaseWindow = [&]() { presenter.Destroy(uiRenderer); };
+    state.releaseWindow = [&]()
+    {
+        cardboard.Destroy(renderer.GetDevice());
+        presenter.Destroy(uiRenderer);
+    };
     bool ready = false; // the device, the renderer, the menu - once
     VkFence acquireFence = VK_NULL_HANDLE;
     bool settingsLoaded = false;
@@ -471,15 +817,20 @@ void RunPhoneApp(android_app *app, AndroidPlatform &platform)
       {
         // Events: all that are waiting - or, with nothing to show (in the
         // background, no window, the ROMs folder picker up), wait for one.
+        // The Cardboard Java initializer is queued onto Android's main thread;
+        // briefly poll while it completes so SDK class lookup never blocks the
+        // UI thread during NativeActivity.onCreate().
         bool quit = false;
         for (;;)
         {
             // (the folder is asked of Android only until the app is up - it's a
             // system call)
-            const bool active = state.resumed && state.window && (ready || platform.HasRomsFolder());
+            const bool sdkInitComplete = platform.CardboardSdkInitializationComplete();
+            const bool active = state.resumed && state.window && (ready || sdkInitComplete);
             int events = 0;
             android_poll_source *source = nullptr;
-            if (ALooper_pollAll(active ? 0 : -1, nullptr, &events, reinterpret_cast<void **>(&source)) < 0)
+            const int timeoutMs = active ? 0 : (sdkInitComplete ? -1 : 100);
+            if (ALooper_pollOnce(timeoutMs, nullptr, &events, reinterpret_cast<void **>(&source)) < 0)
                 break;
             const bool wasResumed = state.resumed;
             if (source)
@@ -493,18 +844,28 @@ void RunPhoneApp(android_app *app, AndroidPlatform &platform)
             // exists. Gone to the background: keep the game's save safe
             // (Android may close the app there without a word).
             if (state.windowChanged && !state.window)
+            {
+                cardboard.Destroy(renderer.GetDevice());
                 presenter.Destroy(uiRenderer);
+            }
             if (wasResumed && !state.resumed && ready)
                 emulator.SaveRamNow();
         }
         if (quit)
             break;
 
+        // Wait asynchronously for the UI-thread Cardboard setup before making
+        // settings visible. A failed or timed-out setup still opens ordinary
+        // phone mode once the Platform marks initialization complete.
+        if (!ready && !platform.CardboardSdkInitializationComplete())
+            continue;
+
         if (state.windowChanged)
         {
             state.windowChanged = false;
             try
             {
+                cardboard.Destroy(renderer.GetDevice());
                 presenter.Destroy(uiRenderer);
                 if (state.window)
                 {
@@ -525,6 +886,12 @@ void RunPhoneApp(android_app *app, AndroidPlatform &platform)
                         if (!settingsLoaded)
                         {
                             settings.Load(platform);
+                            if (!platform.SupportsCardboardViewer() &&
+                                static_cast<Screen3D>(settings.screen3D) == Screen3D::GoogleCardboard)
+                            {
+                                settings.screen3D = static_cast<int>(Screen3D::Off);
+                                settings.Save(platform);
+                            }
                             // (A/B where the Virtual Boy has them, as on the PC window)
                             if (!settings.gamepadByPosition)
                             {
@@ -565,7 +932,10 @@ void RunPhoneApp(android_app *app, AndroidPlatform &platform)
         // The window may have changed size without a new one (a resize).
         if (static_cast<uint32_t>(ANativeWindow_getWidth(state.window)) != presenter.extent.width ||
             static_cast<uint32_t>(ANativeWindow_getHeight(state.window)) != presenter.extent.height)
+        {
+            cardboard.Destroy(renderer.GetDevice());
             presenter.CreateSwapchain(uiRenderer, state.window);
+        }
 
         const auto now = std::chrono::steady_clock::now();
         const float deltaSeconds = std::chrono::duration<float>(now - lastFrameTime).count();
@@ -577,6 +947,11 @@ void RunPhoneApp(android_app *app, AndroidPlatform &platform)
 
         // Editing the touch controls (asked for in the menu): the game waits,
         // the controls show, the menu comes back when the player is done.
+        if (editRequested && static_cast<Screen3D>(settings.screen3D) == Screen3D::GoogleCardboard)
+        {
+            editRequested = false;
+            platform.ShowCardboardMessage("Touch controls are hidden in Cardboard mode. Use a gamepad or Android Back for the menu.");
+        }
         if (editRequested)
         {
             editRequested = false;
@@ -585,6 +960,12 @@ void RunPhoneApp(android_app *app, AndroidPlatform &platform)
         }
         // (the game playing's own layout, if it has one)
         touch.SetGame(platform, emulator.RomName());
+        if (static_cast<Screen3D>(settings.screen3D) == Screen3D::GoogleCardboard && touch.Editing())
+        {
+            touch.EndEdit();
+            touch.Save(platform);
+        }
+        const bool cardboardRequested = static_cast<Screen3D>(settings.screen3D) == Screen3D::GoogleCardboard;
         const bool editing = touch.Editing();
 
         // The touch controls: hidden while a gamepad plays, back on a touch.
@@ -612,8 +993,8 @@ void RunPhoneApp(android_app *app, AndroidPlatform &platform)
                 state.touchShown = true;
             else if (!settings.touchControls && state.touchShown && state.fingers.empty() && now - state.lastTouchSeconds > 4.0)
                 state.touchShown = false;
-            touch.SetVisible(editing || state.touchShown);
-            touch.SetOverGame(!settings.touchControls && !editing); // (the picture stays put as they come and go)
+            touch.SetVisible(!cardboardRequested && (editing || state.touchShown));
+            touch.SetOverGame(!cardboardRequested && !settings.touchControls && !editing); // (the picture stays put as they come and go)
         }
         state.touched = false;
         if (emulator.RomName() != shownRom)
@@ -623,9 +1004,11 @@ void RunPhoneApp(android_app *app, AndroidPlatform &platform)
 
         // The menu: as big as fits (not whole multiples: a phone's screen is
         // much wider than the menu - this fills its height), its shape kept.
-        const float menuScale = std::max(1.0f, std::min(w / static_cast<float>(kMenuWidth), h / static_cast<float>(kMenuHeight)));
+        const float menuWidth = cardboardRequested ? std::floor(w / 2.0f) : w;
+        const float menuScale = std::max(1.0f, std::min(menuWidth / static_cast<float>(kMenuWidth), h / static_cast<float>(kMenuHeight)));
         appMenu.SetMenuScale(uiRenderer, menuScale);
-        const float menuX = std::floor((w - kMenuWidth * menuScale) / 2.0f), menuY = std::floor((h - kMenuHeight * menuScale) / 2.0f);
+        const float menuX = cardboardRequested ? 0.0f : std::floor((w - kMenuWidth * menuScale) / 2.0f);
+        const float menuY = std::floor((h - kMenuHeight * menuScale) / 2.0f);
 
         std::vector<TouchControls::Touch> touches;
         for (const auto &[id, f] : state.fingers)
@@ -633,7 +1016,7 @@ void RunPhoneApp(android_app *app, AndroidPlatform &platform)
 
         // A finger in the menu: tap to pick, drag to scroll (the first one).
         // (Not while it fades out for the touch editor: those fingers are the editor's.)
-        if (appMenu.IsVisible() && !editing)
+        if (appMenu.IsVisible() && !editing && !cardboardRequested)
         {
             const Finger *first = state.fingers.empty() ? nullptr : &state.fingers.begin()->second;
             const float mx = first ? (first->x - menuX) / menuScale : 0.0f, my = first ? (first->y - menuY) / menuScale : 0.0f;
@@ -679,13 +1062,23 @@ void RunPhoneApp(android_app *app, AndroidPlatform &platform)
         if (combo && !menuComboWasHeld)
             appMenu.ToggleOpen();
         menuComboWasHeld = combo;
-        if (backTapped && !menuWasOpen && !appMenu.IsOpen() && emulator.HasGame())
+        if (cardboardRequested && backTapped)
+        {
+            // Android Back is a dedicated physical escape hatch while the
+            // phone is in a viewer. It returns to the ordinary display even
+            // if the on-screen menu is open.
+            settings.screen3D = static_cast<int>(Screen3D::Off);
+            settings.Save(platform);
+            appMenu.Hide();
+            platform.ShowCardboardMessage("Google Cardboard mode off");
+        }
+        else if (backTapped && !menuWasOpen && !appMenu.IsOpen() && emulator.HasGame())
             appMenu.Show();
         backWasHeld = state.backHeld;
 
         // "Back to game" beside the menu (Back works too - not every phone
         // hands the back gesture over in full screen).
-        if (appMenu.IsVisible() && emulator.HasGame())
+        if (appMenu.IsVisible() && emulator.HasGame() && !cardboardRequested)
         {
             touch.LayoutResume(menuX + kMenuWidth * menuScale, menuY);
             if (touch.UpdateResume(touches))
@@ -702,7 +1095,7 @@ void RunPhoneApp(android_app *app, AndroidPlatform &platform)
 
         emulator.SetShadePalette(settings.EffectiveShadePalette());
         bool menuPressed = false;
-        const uint32_t touchBits = appMenu.IsVisible() ? 0 : touch.Update(touches, menuPressed);
+        const uint32_t touchBits = (appMenu.IsVisible() || cardboardRequested) ? 0 : touch.Update(touches, menuPressed);
         if (menuPressed && emulator.HasGame())
             appMenu.Show();
         if (touch.NewlyPressed())
@@ -723,6 +1116,14 @@ void RunPhoneApp(android_app *app, AndroidPlatform &platform)
         for (auto it = state.fingers.begin(); it != state.fingers.end();)
             it = it->second.up ? state.fingers.erase(it) : std::next(it);
 
+        const bool renderCardboardMenu = static_cast<Screen3D>(settings.screen3D) == Screen3D::GoogleCardboard;
+        const float renderMenuWidth = renderCardboardMenu ? std::floor(w / 2.0f) : w;
+        const float renderMenuScale = std::max(1.0f, std::min(renderMenuWidth / static_cast<float>(kMenuWidth),
+                                                             h / static_cast<float>(kMenuHeight)));
+        appMenu.SetMenuScale(uiRenderer, renderMenuScale);
+        const float renderMenuX = renderCardboardMenu ? 0.0f : std::floor((w - kMenuWidth * renderMenuScale) / 2.0f);
+        const float renderMenuY = std::floor((h - kMenuHeight * renderMenuScale) / 2.0f);
+
         // (a game being played: 50 fps - the menu keeps the screen's own rate)
         const float wantedFps = emulator.HasGame() && !appMenu.IsVisible() && !editing ? 50.0f : 0.0f;
         if (wantedFps != hintedFps || state.window != hintedWindow)
@@ -741,12 +1142,33 @@ void RunPhoneApp(android_app *app, AndroidPlatform &platform)
         emulator.PrepareScreen(uiRenderer, presenter.format.format, settings.ScreenTint(), settings.ScreenPattern(),
                                settings.screenLook, anaglyph);
 
+        bool useCardboard = static_cast<Screen3D>(settings.screen3D) == Screen3D::GoogleCardboard;
+        if (useCardboard)
+        {
+            try
+            {
+                cardboard.Ensure(uiRenderer, renderer, presenter, platform);
+            }
+            catch (const std::exception &ex)
+            {
+                LOGE("Cardboard initialization failed: %s", ex.what());
+                cardboard.Destroy(renderer.GetDevice());
+                settings.screen3D = static_cast<int>(Screen3D::Off);
+                settings.Save(platform);
+                platform.ShowCardboardMessage("Cardboard could not start. Switched back to the normal phone display.");
+                useCardboard = false;
+            }
+        }
+        else if (cardboard.IsActive())
+            cardboard.Destroy(renderer.GetDevice());
+
         vkResetFences(renderer.GetDevice(), 1, &acquireFence);
         uint32_t imageIndex = 0;
         const VkResult acquired = vkAcquireNextImageKHR(renderer.GetDevice(), presenter.swapchain, UINT64_MAX, VK_NULL_HANDLE,
                                                         acquireFence, &imageIndex);
         if (acquired == VK_ERROR_OUT_OF_DATE_KHR)
         {
+            cardboard.Destroy(renderer.GetDevice());
             presenter.CreateSwapchain(uiRenderer, state.window);
             continue;
         }
@@ -761,15 +1183,36 @@ void RunPhoneApp(android_app *app, AndroidPlatform &platform)
             CheckVk(acquired, "vkAcquireNextImageKHR");
         vkWaitForFences(renderer.GetDevice(), 1, &acquireFence, VK_TRUE, UINT64_MAX);
 
-        uiRenderer.BeginFrame(presenter.images[imageIndex], presenter.format.format, presenter.extent.width,
-                              presenter.extent.height, appMenu.GetBackgroundColor());
+        if (useCardboard)
+            uiRenderer.BeginOffscreenFrame(cardboard.Atlas(), appMenu.GetBackgroundColor());
+        else
+            uiRenderer.BeginFrame(presenter.images[imageIndex], presenter.format.format, presenter.extent.width,
+                                  presenter.extent.height, appMenu.GetBackgroundColor(), true);
         if (emulator.HasScreen() && emulator.HasGame())
         {
             float ax = 0, ay = 0, aw = 0, ah = 0;
-            touch.ScreenArea(ax, ay, aw, ah);
             const Screen3D mode = static_cast<Screen3D>(settings.screen3D);
             float sx = 0, sy = 0, sw = 0, sh = 0;
-            if (mode == Screen3D::SideBySideHalf || mode == Screen3D::SideBySideFull || mode == Screen3D::CrossEyed ||
+            if (useCardboard)
+            {
+                const float eyeWidth = std::floor(w / 2.0f);
+                for (int eye = 0; eye < 2; ++eye)
+                {
+                    const float areaX = eye * eyeWidth;
+                    // Keep user magnification inside this eye's atlas half;
+                    // otherwise an enlarged screen can leak into the other eye.
+                    uiRenderer.SetClipRect(areaX, 0.0f, eyeWidth, h);
+                    FitScreen(areaX, 0.0f, eyeWidth, h, settings.screenWholePixels, sx, sy, sw, sh);
+                    sw *= settings.cardboardScale;
+                    sh *= settings.cardboardScale;
+                    sx = areaX + std::floor((eyeWidth - sw) / 2.0f);
+                    sy = std::floor((h - sh) / 2.0f);
+                    emulator.DrawScreen(uiRenderer, sx, sy, sw, sh, eye == 0 ? Emulator::Eye::Left : Emulator::Eye::Right,
+                                        settings.ScreenTint(), settings.ScreenPattern(), settings.screenLook);
+                }
+                uiRenderer.ResetClipRect();
+            }
+            else if (mode == Screen3D::SideBySideHalf || mode == Screen3D::SideBySideFull || mode == Screen3D::CrossEyed ||
                 mode == Screen3D::TopBottom || mode == Screen3D::TopBottomFull)
             {
                 // A phone viewer or a 3D screen: the whole screen, one eye per half.
@@ -798,6 +1241,7 @@ void RunPhoneApp(android_app *app, AndroidPlatform &platform)
             }
             else
             {
+                touch.ScreenArea(ax, ay, aw, ah);
                 FitScreen(ax, ay, aw, ah, settings.screenWholePixels, sx, sy, sw, sh);
                 if (anaglyph > 0)
                     emulator.DrawAnaglyph(uiRenderer, sx, sy, sw, sh, anaglyph, settings.screenLook);
@@ -806,17 +1250,29 @@ void RunPhoneApp(android_app *app, AndroidPlatform &platform)
                                         settings.screenLook);
             }
         }
-        if (vbFrameAlpha > 0.0f)
+        if (!useCardboard && vbFrameAlpha > 0.0f)
             vbFrame.Draw(uiRenderer, w, h, vbFrameAlpha);
-        if (editing)
+        if (useCardboard)
+        {
+            const float eyeWidth = std::floor(w / 2.0f);
+            const float cardMenuScale = renderMenuScale;
+            if (appMenu.IsVisible() || appMenu.NoticeShowing())
+                for (int eye = 0; eye < 2; ++eye)
+                {
+                    const float x = eye * eyeWidth + std::floor((eyeWidth - kMenuWidth * cardMenuScale) / 2.0f);
+                    const float y = std::floor((h - kMenuHeight * cardMenuScale) / 2.0f);
+                    appMenu.Draw(uiRenderer, x, y);
+                }
+        }
+        else if (editing)
         {
             touch.DrawEdit(uiRenderer);
             if (appMenu.IsVisible()) // (fading out)
-                appMenu.Draw(uiRenderer, menuX, menuY);
+                appMenu.Draw(uiRenderer, renderMenuX, renderMenuY);
         }
         else if (appMenu.IsVisible())
         {
-            appMenu.Draw(uiRenderer, menuX, menuY);
+            appMenu.Draw(uiRenderer, renderMenuX, renderMenuY);
             if (emulator.HasGame())
                 touch.DrawResume(uiRenderer);
         }
@@ -824,9 +1280,11 @@ void RunPhoneApp(android_app *app, AndroidPlatform &platform)
         {
             touch.Draw(uiRenderer);
             if (appMenu.NoticeShowing()) // (an achievement unlocked, over the game)
-                appMenu.Draw(uiRenderer, menuX, menuY);
+                appMenu.Draw(uiRenderer, renderMenuX, renderMenuY);
         }
         uiRenderer.EndFrame();
+        if (useCardboard)
+            cardboard.Distort(uiRenderer, imageIndex, presenter.extent.width, presenter.extent.height);
 
         VkPresentInfoKHR presentInfo{VK_STRUCTURE_TYPE_PRESENT_INFO_KHR};
         presentInfo.swapchainCount = 1;
@@ -838,7 +1296,10 @@ void RunPhoneApp(android_app *app, AndroidPlatform &platform)
         // before it was shown: a black screen. A new size is caught above.)
         const VkResult presented = vkQueuePresentKHR(renderer.GetQueue(), &presentInfo);
         if (presented == VK_ERROR_OUT_OF_DATE_KHR)
+        {
+            cardboard.Destroy(renderer.GetDevice());
             presenter.CreateSwapchain(uiRenderer, state.window);
+        }
       }
       catch (const std::exception &ex)
       {
@@ -853,6 +1314,7 @@ void RunPhoneApp(android_app *app, AndroidPlatform &platform)
     {
         if (ready)
             emulator.SaveRamNow();
+        cardboard.Destroy(renderer.GetDevice());
         presenter.Destroy(uiRenderer);
         WaitForClose(app);
     }
@@ -862,6 +1324,7 @@ void RunPhoneApp(android_app *app, AndroidPlatform &platform)
         emulator.Shutdown();
         if (acquireFence != VK_NULL_HANDLE)
             vkDestroyFence(renderer.GetDevice(), acquireFence, nullptr);
+        cardboard.Destroy(renderer.GetDevice());
         presenter.Destroy(uiRenderer);
         uiRenderer.Shutdown();
         renderer.Shutdown();

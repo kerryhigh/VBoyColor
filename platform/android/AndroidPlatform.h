@@ -2,6 +2,7 @@
 
 #include "io/Platform.h"
 
+#include <chrono>
 #include <jni.h>
 #include <set>
 
@@ -19,6 +20,12 @@ public:
     // called once at startup, before anything else here.
     AndroidPlatform(JavaVM *vm, jobject activityClazz, AAssetManager *assetManager);
 
+    // Cardboard's Java classes must be resolved from the Activity class loader.
+    // This queues SDK initialization on the UI thread before phone-mode
+    // settings or rendering can use any Cardboard APIs.
+    bool InitializeCardboardSdk();
+    bool CardboardSdkInitializationComplete() const;
+
     bool HasRomsFolder() const override;
     bool SupportsChangeRomsFolder() const override { return true; }
     void RequestChangeRomsFolder() override;
@@ -33,6 +40,10 @@ public:
     // Settings > Folders, with the system's folder picker (MainActivity's
     // pickFolder: right away on a phone, at the next start on a headset).
     bool SupportsDataFolders() const override { return true; }
+    bool SupportsCardboardViewer() const override;
+    void RequestCardboardViewerScan() override;
+    void ShowCardboardMessage(const std::string &message) override;
+    void SetPhoneMode(bool enabled) { m_phoneMode = enabled; }
     std::string DataFolderLabel(DataKind kind) const override;
     std::string SetDataFolder(DataKind kind, const std::string &path) override; // ("" only: back to the default)
     std::string PickDataFolder(DataKind kind) override;
@@ -84,4 +95,6 @@ private:
     int m_nextHttpId = 0;
     AAssetManager *m_assetManager = nullptr;
     bool m_canQuit = false, m_quit = false;
+    bool m_phoneMode = false;
+    std::chrono::steady_clock::time_point m_cardboardInitDeadline{};
 };

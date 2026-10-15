@@ -173,6 +173,11 @@ jobs:
           distribution: temurin
           java-version: 17
 
+      - name: Android SDK components
+        run: |
+          yes | sdkmanager --licenses >/dev/null
+          sdkmanager --install "platforms;android-35" "build-tools;35.0.0" "cmake;3.22.1" "ndk;29.0.14206865"
+
       - name: Signing key
         env:
           KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}

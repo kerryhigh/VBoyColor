@@ -62,11 +62,13 @@ VkRenderPass UiRenderer::GetOrCreateRenderPass(VkFormat format)
     return m_renderPass;
 }
 
-VkRenderPass UiRenderer::GetOrCreateOffscreenRenderPass(VkFormat format)
+VkRenderPass UiRenderer::GetOrCreateOffscreenRenderPass(VkFormat format, bool generalLayout)
 {
-    if (m_offscreenRenderPass != VK_NULL_HANDLE && m_offscreenRenderPassFormat == format)
-        return m_offscreenRenderPass;
-    if (m_offscreenRenderPass != VK_NULL_HANDLE)
+    VkRenderPass &pass = generalLayout ? m_generalOffscreenRenderPass : m_offscreenRenderPass;
+    VkFormat &passFormat = generalLayout ? m_generalOffscreenRenderPassFormat : m_offscreenRenderPassFormat;
+    if (pass != VK_NULL_HANDLE && passFormat == format)
+        return pass;
+    if (pass != VK_NULL_HANDLE)
         throw std::runtime_error("UiRenderer: offscreen render texture format changed after first use - not supported");
 
     VkAttachmentDescription colorAttachment{};
@@ -77,9 +79,9 @@ VkRenderPass UiRenderer::GetOrCreateOffscreenRenderPass(VkFormat format)
     colorAttachment.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
     colorAttachment.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
     colorAttachment.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-    // Ends in shader-readable layout - this target gets sampled by
-    // DrawImageRounded's compositing draw in the next render pass.
-    colorAttachment.finalLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    // Ordinary offscreen targets are sampled by UiRenderer. Cardboard's
+    // Vulkan renderer requires its eye atlas in GENERAL layout.
+    colorAttachment.finalLayout = generalLayout ? VK_IMAGE_LAYOUT_GENERAL : VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
 
     VkAttachmentReference colorRef{0, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL};
 
@@ -110,10 +112,56 @@ VkRenderPass UiRenderer::GetOrCreateOffscreenRenderPass(VkFormat format)
     renderPassInfo.pSubpasses = &subpass;
     renderPassInfo.dependencyCount = 2;
     renderPassInfo.pDependencies = dependencies;
-    CheckVk(vkCreateRenderPass(m_device, &renderPassInfo, nullptr, &m_offscreenRenderPass),
+    CheckVk(vkCreateRenderPass(m_device, &renderPassInfo, nullptr, &pass),
             "vkCreateRenderPass (ui offscreen)");
-    m_offscreenRenderPassFormat = format;
-    return m_offscreenRenderPass;
+    passFormat = format;
+    return pass;
+}
+
+VkRenderPass UiRenderer::GetOrCreatePresentRenderPass(VkFormat format)
+{
+    if (m_presentRenderPass != VK_NULL_HANDLE && m_presentRenderPassFormat == format)
+        return m_presentRenderPass;
+    if (m_presentRenderPass != VK_NULL_HANDLE)
+        throw std::runtime_error("UiRenderer: presentable image format changed after first use - not supported");
+
+    VkAttachmentDescription colorAttachment{};
+    colorAttachment.format = format;
+    colorAttachment.samples = VK_SAMPLE_COUNT_1_BIT;
+    colorAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+    colorAttachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+    colorAttachment.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+    colorAttachment.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+    // Acquired Android swapchain images may arrive from PRESENT_SRC after a
+    // previous frame; UNDEFINED intentionally discards that old content.
+    colorAttachment.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    colorAttachment.finalLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+
+    VkAttachmentReference colorRef{0, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL};
+    VkSubpassDescription subpass{};
+    subpass.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
+    subpass.colorAttachmentCount = 1;
+    subpass.pColorAttachments = &colorRef;
+
+    VkSubpassDependency dependency{};
+    dependency.srcSubpass = VK_SUBPASS_EXTERNAL;
+    dependency.dstSubpass = 0;
+    dependency.srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+    dependency.dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+    dependency.srcAccessMask = 0;
+    dependency.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+
+    VkRenderPassCreateInfo renderPassInfo{VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO};
+    renderPassInfo.attachmentCount = 1;
+    renderPassInfo.pAttachments = &colorAttachment;
+    renderPassInfo.subpassCount = 1;
+    renderPassInfo.pSubpasses = &subpass;
+    renderPassInfo.dependencyCount = 1;
+    renderPassInfo.pDependencies = &dependency;
+    CheckVk(vkCreateRenderPass(m_device, &renderPassInfo, nullptr, &m_presentRenderPass),
+            "vkCreateRenderPass (presentable ui)");
+    m_presentRenderPassFormat = format;
+    return m_presentRenderPass;
 }
 
 void UiRenderer::EnsurePipelines(VkFormat format)
